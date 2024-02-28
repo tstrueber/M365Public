@@ -4,12 +4,7 @@ $forwarders = `
     get-content "C:temp\forwarders.json" `
     | ConvertFrom-Json
 
-$importlist = $forwarders | Where-Object{$_.PrimarySmtpAddress -match "contoso.com" } # filter the list
-$importlist `
-    | sort-object PrimarySmtpAddress `
-    | select-object PrimarySmtpAddress,resolvedForwardingAddress,ForwardingSmtpAddress,DeliverToMailboxAndForward
-
-foreach($forwarder in $importlist)
+foreach($forwarder in $forwarders)
 {
     if($forwarder.ForwardingSmtpAddress -ne $null)
     {
