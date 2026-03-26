@@ -79,8 +79,8 @@ $LogFile = Join-Path -Path $LogPath -ChildPath "WindowsBackupReport_$(Get-Date -
 $TranscriptFile = Join-Path -Path $LogPath -ChildPath "Transcript_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
 
 # Event Log Constants
-$EventLogName = "Windows Server Backup"
-$EventSourceName = "Backup"
+$EventLogName = "Microsoft-Windows-Backup"
+$EventSourceName = "Microsoft-Windows-Backup"
 $SuccessEventId = 4      # Backup erfolgreich abgeschlossen
 $FailureEventId = 12     # Backup fehlgeschlagen
 $WarningEventId = 8      # Backup mit Fehlern abgeschlossen
@@ -590,19 +590,19 @@ function New-BackupMonitorTask {
             
             # Erstelle Event Trigger 1: Success (Event ID 4)
             $EventTrigger1 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger1.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=4)]]</Select></Query></QueryList>"
+            $EventTrigger1.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=4)]]</Select></Query></QueryList>"
             $EventTrigger1.Enabled = $true
             $EventTrigger1.Id = "EventTrigger_Success"
             
             # Erstelle Event Trigger 2: Failure (Event ID 12)
             $EventTrigger2 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger2.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=12)]]</Select></Query></QueryList>"
+            $EventTrigger2.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=12)]]</Select></Query></QueryList>"
             $EventTrigger2.Enabled = $true
             $EventTrigger2.Id = "EventTrigger_Failure"
             
             # Erstelle Event Trigger 3: Warning (Event ID 8)
             $EventTrigger3 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger3.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=8)]]</Select></Query></QueryList>"
+            $EventTrigger3.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=8)]]</Select></Query></QueryList>"
             $EventTrigger3.Enabled = $true
             $EventTrigger3.Id = "EventTrigger_Warning"
             

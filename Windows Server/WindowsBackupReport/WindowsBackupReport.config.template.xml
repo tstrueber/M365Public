@@ -31,10 +31,10 @@ Speicherort: WindowsBackupReport.config.xml (im selben Verzeichnis wie das Scrip
   <!-- Diese Einstellungen werden vom Script verwendet, um die richtigen Events zu finden -->
   <Backup>
     <!-- Event Log Name - Standard für Windows Server Backup -->
-    <EventLogName>Windows Server Backup</EventLogName>
+    <EventLogName>Microsoft-Windows-Backup</EventLogName>
     
     <!-- Event Source Name - Standard für Windows Server Backup -->
-    <EventSourceName>Backup</EventSourceName>
+    <EventSourceName>Microsoft-Windows-Backup</EventSourceName>
     
     <!-- Event ID für erfolgreiche Backups -->
     <SuccessEventId>4</SuccessEventId>
