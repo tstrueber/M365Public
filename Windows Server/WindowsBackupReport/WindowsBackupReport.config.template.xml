@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 
+Windows Backup Report Monitor - Konfigurationsdatei
+==================================================
+Diese Datei wird automatisch vom Script erstellt.
+Sie können sie manuell anpassen und dann von neuem Skript-Läufen übernehmen.
+
+Speicherort: WindowsBackupReport.config.xml (im selben Verzeichnis wie das Script)
+-->
+<Configuration>
+  <!-- SMTP-Einstellungen für E-Mail-Versand -->
+  <SMTP>
+    <!-- SMTP-Server-Adresse oder IP-Adresse -->
+    <Server>smtp.contoso.com</Server>
+    
+    <!-- SMTP-Port (Standard: 25, SSL/TLS: 587 oder 465) -->
+    <Port>25</Port>
+    
+    <!-- Absender-E-Mail-Adresse -->
+    <From>backup@contoso.com</From>
+    
+    <!-- Empfänger-E-Mail-Adresse(n) - mehrere durch Semikolon getrennt -->
+    <!-- Beispiel: admin@contoso.com;ops@contoso.com -->
+    <To>admin@contoso.com</To>
+    
+    <!-- SSL/TLS verwenden? (true/false) -->
+    <UseSSL>false</UseSSL>
+  </SMTP>
+  
+  <!-- Backup Event Log Konfiguration -->
+  <!-- Diese Einstellungen werden vom Script verwendet, um die richtigen Events zu finden -->
+  <Backup>
+    <!-- Event Log Name - Standard für Windows Server Backup -->
+    <EventLogName>Windows Server Backup</EventLogName>
+    
+    <!-- Event Source Name - Standard für Windows Server Backup -->
+    <EventSourceName>Backup</EventSourceName>
+    
+    <!-- Event ID für erfolgreiche Backups -->
+    <SuccessEventId>4</SuccessEventId>
+    
+    <!-- Event ID für fehlgeschlagene Backups -->
+    <FailureEventId>12</FailureEventId>
+    
+    <!-- Event ID für Backups mit Fehlern/Warnungen -->
+    <WarningEventId>8</WarningEventId>
+  </Backup>
+  
+  <!-- Optional: Erweiterte Einstellungen -->
+  <Advanced>
+    <!-- Maximale Anzahl der Events, die beim Start überprüft werden -->
+    <MaxEventLookback>10</MaxEventLookback>
+    
+    <!-- Zeitfenster in Minuten, in dem Events berücksichtigt werden (Standard: 5) -->
+    <EventTimeWindowMinutes>5</EventTimeWindowMinutes>
+    
+    <!-- E-Mail-Encoding (utf-8 / iso-8859-1 / etc.) -->
+    <EmailEncoding>utf-8</EmailEncoding>
+  </Advanced>
+</Configuration>
