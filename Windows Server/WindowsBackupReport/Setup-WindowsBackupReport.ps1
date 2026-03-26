@@ -231,43 +231,71 @@ function Create-ScheduledTask {
             -DontStopIfGoingOnBatteries `
             -MultipleInstances IgnoreNew
         
-        # Erstelle Event Trigger
-        Write-Info "Erstelle Event-Trigger..."
+        Write-Info "Erstelle Scheduled Task mit Event-Triggern..."
         
-        # Trigger 1: Erfolgreicher Backup (Event ID 4)
-        $Trigger1 = New-ScheduledTaskTrigger -CimTriggerType EventTrigger -TriggerAtLogon $false
-        $Trigger1.StateChecks = @()
-        $Trigger1.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=4)]]</Select></Query></QueryList>"
+        # Erstelle zuerst einen Dummy-Trigger
+        $DummyTrigger = New-ScheduledTaskTrigger -AtLogon
         
-        # Trigger 2: Fehlgeschlagener Backup (Event ID 12)
-        $Trigger2 = New-ScheduledTaskTrigger -CimTriggerType EventTrigger -TriggerAtLogon $false
-        $Trigger2.StateChecks = @()
-        $Trigger2.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=12)]]</Select></Query></QueryList>"
-        
-        # Trigger 3: Backup mit Fehlern (Event ID 8)
-        $Trigger3 = New-ScheduledTaskTrigger -CimTriggerType EventTrigger -TriggerAtLogon $false
-        $Trigger3.StateChecks = @()
-        $Trigger3.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=8)]]</Select></Query></QueryList>"
-        
-        Write-Success "Event Trigger erstellt"
-        
-        # Registriere den Task
-        Register-ScheduledTask `
+        # Registriere den Task zuerst
+        $Task = Register-ScheduledTask `
             -TaskName $TaskName `
             -Action $TaskAction `
-            -Trigger @($Trigger1, $Trigger2, $Trigger3) `
+            -Trigger $DummyTrigger `
             -Settings $TaskSettings `
             -Description "Überwacht Windows Backup Events und versendet E-Mail-Benachrichtigungen" `
             -RunLevel Highest `
-            -ErrorAction Stop | Out-Null
+            -ErrorAction Stop
         
-        Write-Success "Scheduled Task erfolgreich erstellt: $TaskName"
-        Write-Success "Event-Trigger automatisch hinzugefügt:"
-        Write-Host "  ✓ Event ID 4 (erfolgreicher Backup)" -ForegroundColor $SuccessColor
-        Write-Host "  ✓ Event ID 12 (fehlgeschlagener Backup)" -ForegroundColor $SuccessColor
-        Write-Host "  ✓ Event ID 8 (Backup mit Fehlern)" -ForegroundColor $SuccessColor
-        
-        return $true
+        # Nutze TaskScheduler COM-API für Event-Trigger (PowerShell 7 kompatibel)
+        try {
+            Write-Info "Konfiguriere Event-Trigger via TaskScheduler COM-API..."
+            
+            $TaskScheduler = New-Object -ComObject "Schedule.Service"
+            $TaskScheduler.Connect()
+            
+            $RootFolder = $TaskScheduler.GetFolder("\")
+            $ScheduledTask = $RootFolder.GetTask($TaskName)
+            $Definition = $ScheduledTask.Definition
+            
+            # Entferne den Dummy-Trigger
+            while ($Definition.Triggers.Count -gt 0) {
+                $Definition.Triggers.Remove(1)
+            }
+            
+            # Erstelle Event Trigger 1: Success (Event ID 4)
+            $EventTrigger1 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
+            $EventTrigger1.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=4)]]</Select></Query></QueryList>"
+            $EventTrigger1.Enabled = $true
+            $EventTrigger1.Id = "EventTrigger_Success"
+            
+            # Erstelle Event Trigger 2: Failure (Event ID 12)
+            $EventTrigger2 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
+            $EventTrigger2.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=12)]]</Select></Query></QueryList>"
+            $EventTrigger2.Enabled = $true
+            $EventTrigger2.Id = "EventTrigger_Failure"
+            
+            # Erstelle Event Trigger 3: Warning (Event ID 8)
+            $EventTrigger3 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
+            $EventTrigger3.Subscription = "<QueryList><Query Id='0'><Select Path='Windows Server Backup'>*[System[(EventID=8)]]</Select></Query></QueryList>"
+            $EventTrigger3.Enabled = $true
+            $EventTrigger3.Id = "EventTrigger_Warning"
+            
+            # Speichere die aktualisierte Definition
+            $RootFolder.RegisterTaskDefinition($TaskName, $Definition, 6, $null, $null, 3) | Out-Null
+            
+            Write-Success "Scheduled Task erfolgreich erstellt: $TaskName"
+            Write-Success "Event-Trigger automatisch hinzugefügt:"
+            Write-Host "  ✓ Event ID 4 (erfolgreicher Backup)" -ForegroundColor $SuccessColor
+            Write-Host "  ✓ Event ID 12 (fehlgeschlagener Backup)" -ForegroundColor $SuccessColor
+            Write-Host "  ✓ Event ID 8 (Backup mit Fehlern)" -ForegroundColor $SuccessColor
+            
+            return $true
+        }
+        catch {
+            Write-Warning "Fehler beim Konfigurieren der Event-Trigger: $_"
+            Write-Info "Der Task wurde erstellt, aber die Event-Trigger müssen manuell konfiguriert werden."
+            return $true
+        }
     }
     catch {
         Write-Error "Fehler beim Erstellen des Scheduled Tasks: $_"
