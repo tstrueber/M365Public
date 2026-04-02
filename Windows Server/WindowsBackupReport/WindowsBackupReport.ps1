@@ -263,9 +263,9 @@ function Create-BackupEmailBody {
     $EventMessage = $Event.Message
     
     $StatusColor = switch ($Status) {
-        "Success" { "&#10003; Erfolgreich" }
-        "Failure" { "&#10005; Fehlgeschlagen" }
-        "Warning" { "⚠ Mit Fehlern abgeschlossen" }
+        "Success" { "[OK] Erfolgreich" }
+        "Failure" { "[FEHLER] Fehlgeschlagen" }
+        "Warning" { "[WARNUNG] Mit Fehlern abgeschlossen" }
     }
     
     $Body = @"
@@ -366,9 +366,9 @@ function Send-BackupEmailReport {
         $ComputerName = $env:COMPUTERNAME
         
         $Subject = switch ($Status) {
-            "Success" { "✓ Windows Backup erfolgreich - $ComputerName" }
-            "Failure" { "✗ Windows Backup fehlgeschlagen - $ComputerName" }
-            "Warning" { "⚠ Windows Backup mit Fehlern - $ComputerName" }
+            "Success" { "[OK] Windows Backup erfolgreich - $ComputerName" }
+            "Failure" { "[FEHLER] Windows Backup fehlgeschlagen - $ComputerName" }
+            "Warning" { "[WARNUNG] Windows Backup mit Fehlern - $ComputerName" }
         }
         
         $Body = Create-BackupEmailBody -Event $Event -Status $Status
@@ -382,14 +382,11 @@ function Send-BackupEmailReport {
             Body          = $Body
             BodyAsHtml    = $true
             ErrorAction   = "Stop"
+            UseSsl        = $false
         }
         
         if ($Credential) {
             $MailParams["Credential"] = $Credential
-        }
-        
-        if ($UseSSL) {
-            $MailParams["UseSsl"] = $true
         }
         
         Send-MailMessage @MailParams
@@ -611,9 +608,9 @@ function New-BackupMonitorTask {
             
             Write-LogEntry "Scheduled Task '$TaskName' erfolgreich erstellt" -Level Success
             Write-LogEntry "Event-Trigger automatisch hinzugefügt:" -Level Success
-            Write-LogEntry "  ✓ Event ID 4 (erfolgreicher Backup)" -Level Success
-            Write-LogEntry "  ✓ Event ID 12 (fehlgeschlagener Backup)" -Level Success
-            Write-LogEntry "  ✓ Event ID 8 (Backup mit Fehlern)" -Level Success
+            Write-LogEntry "  [+] Event ID 4 (erfolgreicher Backup)" -Level Success
+            Write-LogEntry "  [+] Event ID 12 (fehlgeschlagener Backup)" -Level Success
+            Write-LogEntry "  [+] Event ID 8 (Backup mit Fehlern)" -Level Success
             
             return $true
         }
