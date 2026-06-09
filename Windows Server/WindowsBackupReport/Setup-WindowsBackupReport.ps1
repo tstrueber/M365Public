@@ -56,6 +56,16 @@ function Write-Error {
     Write-Host "[✗] $Text" -ForegroundColor $ErrorColor
 }
 
+function Test-YesInput {
+    param([string]$InputText)
+    return $InputText -match '^(?i:j|ja|y|yes|true|1)$'
+}
+
+function Test-NoInput {
+    param([string]$InputText)
+    return $InputText -match '^(?i:n|nein|no|false|0)$'
+}
+
 function Test-AdminPrivileges {
     if (-not ([Security.Principal.WindowsPrincipal] [Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) {
         Write-Error "Dieses Script erfordert Administrator-Rechte!"
@@ -131,16 +141,10 @@ function Get-SMTPConfiguration {
     
     # SSL/TLS
     $SSLInput = Read-Host "SSL/TLS verwenden? (j/n) [n]"
-    $Config.UseSSL = $SSLInput -match '^(?i:j|ja|y|yes|true|1)$'
+    $Config.UseSSL = Test-YesInput -InputText $SSLInput
     Write-Info "SSL/TLS: $($Config.UseSSL)"
-    
-    # Anmeldedaten
-    $AuthInput = Read-Host "SMTP-Authentifizierung erforderlich? (j/n) [n]"
-    if ($AuthInput -match '^(?i:j|ja|y|yes|true|1)$') {
-        Write-Info "Geben Sie Ihre SMTP-Anmeldedaten ein:"
-        $Config.Credential = Get-Credential -Message "SMTP-Anmeldedaten" -UserName $Config.From
-        Write-Warning "Hinweis: SMTP-Anmeldedaten werden aus Sicherheitsgründen nicht im Scheduled Task gespeichert."
-    }
+
+    Write-Info "Hinweis: SMTP-Anmeldedaten werden im Setup nicht erfasst, da sie nicht sicher im Scheduled Task gespeichert werden."
     
     return $Config
 }
@@ -171,10 +175,6 @@ function Test-SMTPConnection {
         
         if ($Config.UseSSL) {
             $SMTPClient.EnableSsl = $true
-        }
-        
-        if ($Config.Credential) {
-            $SMTPClient.Credentials = $Config.Credential
         }
         
         $SMTPClient.Send($Config.From, $recipientList[0], "Test", "Test")
@@ -228,7 +228,7 @@ function New-BackupMonitorTask {
     
     if ($ExistingTask) {
         $Confirm = Read-Host "Task existiert bereits. Überschreiben? (j/n) [j]"
-        if ($Confirm -eq "n") {
+        if (Test-NoInput -InputText $Confirm) {
             Write-Warning "Task-Erstellung abgebrochen"
             return $false
         }
@@ -292,7 +292,7 @@ function Show-Summary {
     Write-Host "  Von: $($Config.From)" -ForegroundColor White
     Write-Host "  An: $($Config.To)" -ForegroundColor White
     Write-Host "  SSL/TLS: $($Config.UseSSL)" -ForegroundColor White
-    Write-Host "  Anmeldedaten: $(if ($Config.Credential) { 'ja' } else { 'nein' })" -ForegroundColor White
+    Write-Host "  Anmeldedaten: nicht im Setup enthalten" -ForegroundColor White
     Write-Host ""
     
     Write-Host "Logs werden gespeichert unter:" -ForegroundColor $InfoColor
@@ -330,14 +330,14 @@ try {
     Show-Summary -Config $SMTPConfig
     
     $TestSMTP = Read-Host "SMTP-Verbindung testen? (j/n) [n]"
-    if ($TestSMTP -eq "j") {
+    if (Test-YesInput -InputText $TestSMTP) {
         Test-SMTPConnection -Config $SMTPConfig
     }
     
     # Task erstellen
     if (-not $SkipTaskCreation) {
         $CreateTask = Read-Host "Scheduled Task erstellen? (j/n) [j]"
-        if ($CreateTask -ne "n") {
+        if (-not (Test-NoInput -InputText $CreateTask)) {
             $TaskCreated = New-BackupMonitorTask -Config $SMTPConfig
             
             if ($TaskCreated) {

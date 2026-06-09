@@ -11,7 +11,8 @@ Das Hauptscript laeuft stündlich und wertet die letzten 60 Minuten aus.
   - Application
   - System
 - Berücksichtigt deutsche und englische Ereignismuster.
-- Sendet genau eine Zusammenfassungs-E-Mail pro Lauf.
+- Sendet genau eine Zusammenfassungs-E-Mail pro Lauf, aber nur wenn relevante Ereignisse gefunden wurden.
+- Wenn keine relevanten Ereignisse gefunden werden, wird keine E-Mail versendet.
 - Bewertet den Gesamtstatus fuer den Betreff:
   - [FEHLER] wenn mindestens ein Fehler gefunden wurde
   - [WARNUNG] wenn mindestens eine Warnung gefunden wurde
@@ -84,6 +85,10 @@ Die stündliche HTML-E-Mail enthaelt:
 - Anzahl OK/Info, Warnungen, Fehler, Gesamt
 - Tabelle relevanter Ereignisse (Zeit, Log, ID, Quelle, Level, gekuerzte Nachricht)
 - erkannte Server-Sprache (Culture/UI Culture)
+
+Wichtig:
+
+- Bei 0 gefundenen relevanten Ereignissen in der letzten Stunde wird keine E-Mail versendet.
 
 ## SMTP-Credentials
 
@@ -160,6 +165,10 @@ Pruefen:
 1. Event-Volumen in letzter Stunde in den Logs Microsoft-Windows-Backup, Application, System
 2. Ob Drittanbieter-Backupsoftware viele zusaetzliche Events erzeugt
 3. Tageslog fuer Hinweise zur Ereignis-Selektion
+
+Hinweis:
+
+- Wenn keine relevanten Ereignisse gefunden wurden, ist keine E-Mail erwartbar (das ist das gewuenschte Verhalten).
 
 ### SMTP Versand scheitert
 

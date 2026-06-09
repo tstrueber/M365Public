@@ -566,6 +566,11 @@ function Invoke-BackupMonitoring {
     $events = Get-RelevantBackupEvents -Since $windowStart -Until $windowEnd -LanguageContext $languageContext
     Write-LogEntry "Relevante Ereignisse im letzten Zeitraum gefunden: $($events.Count)" -Level Info
 
+    if (-not $events -or $events.Count -eq 0) {
+        Write-LogEntry "Keine relevanten Ereignisse in der letzten Stunde gefunden. Es wird keine E-Mail versendet." -Level Info
+        return
+    }
+
     if ($events.Count -gt 1) {
         Write-LogEntry "Hinweis: Es wurden mehrere relevante Ereignisse in der letzten Stunde gefunden (normalerweise wird nur ein Abschlussereignis erwartet)." -Level Warning
     }
