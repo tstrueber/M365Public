@@ -172,6 +172,9 @@ function Test-SMTPConnection {
         }
 
         $SMTPClient = New-Object Net.Mail.SmtpClient($Config.Server, $Config.Port)
+        # Nie interaktive Authentifizierung im Setup-Test auslösen
+        $SMTPClient.UseDefaultCredentials = $false
+        $SMTPClient.Credentials = $null
         
         if ($Config.UseSSL) {
             $SMTPClient.EnableSsl = $true
@@ -244,15 +247,16 @@ function New-BackupMonitorTask {
     }
     
     Write-Info "Verwende Hauptscript: $ScriptPath"
-    Write-Info "Delegiere Task-Erstellung an das Hauptscript (stündlicher Trigger)."
+    Write-Info "Erstelle Scheduled Task direkt mit stündlichem Trigger (ohne Credential-Prompt)."
 
     try {
-        $PowerShellExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell.exe" }
+        $PowerShellExe = "powershell.exe"
         $Arguments = @(
             "-NoProfile",
+            "-NoLogo",
+            "-NonInteractive",
             "-ExecutionPolicy", "Bypass",
             "-File", $ScriptPath,
-            "-CreateTask",
             "-SMTPServer", $Config.Server,
             "-SMTPPort", [string]$Config.Port,
             "-From", $Config.From,
@@ -264,12 +268,33 @@ function New-BackupMonitorTask {
             $Arguments += "-UseSSL"
         }
 
-        $TaskProcess = Start-Process -FilePath $PowerShellExe -ArgumentList $Arguments -NoNewWindow -Wait -PassThru
+        $ArgumentString = $Arguments -join " "
 
-        if ($TaskProcess.ExitCode -ne 0) {
-            Write-Error "Task-Erstellung durch das Hauptscript fehlgeschlagen (ExitCode: $($TaskProcess.ExitCode))"
-            return $false
-        }
+        $TaskAction = New-ScheduledTaskAction `
+            -Execute $PowerShellExe `
+            -Argument $ArgumentString
+
+        $TaskSettings = New-ScheduledTaskSettingsSet `
+            -AllowStartIfOnBatteries `
+            -RunOnlyIfNetworkAvailable `
+            -StartWhenAvailable `
+            -DontStopIfGoingOnBatteries `
+            -MultipleInstances IgnoreNew
+
+        $TaskTrigger = New-ScheduledTaskTrigger `
+            -Daily `
+            -At "00:00" `
+            -RepetitionInterval (New-TimeSpan -Hours 1) `
+            -RepetitionDuration (New-TimeSpan -Days 1)
+
+        $null = Register-ScheduledTask `
+            -TaskName $TaskName `
+            -Action $TaskAction `
+            -Trigger $TaskTrigger `
+            -Settings $TaskSettings `
+            -Description "Prueft stündlich Windows Backup Logs und versendet eine E-Mail-Zusammenfassung" `
+            -RunLevel Highest `
+            -ErrorAction Stop
 
         Write-Success "Scheduled Task erfolgreich erstellt: $TaskName"
         Write-Success "Trigger: stündlich (alle 60 Minuten)"
@@ -329,6 +354,7 @@ try {
     # SMTP testen
     Show-Summary -Config $SMTPConfig
     
+    Write-Info "Hinweis: Der SMTP-Test erfolgt ohne Authentifizierung und fragt kein Passwort ab."
     $TestSMTP = Read-Host "SMTP-Verbindung testen? (j/n) [n]"
     if (Test-YesInput -InputText $TestSMTP) {
         Test-SMTPConnection -Config $SMTPConfig
