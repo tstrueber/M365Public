@@ -140,7 +140,7 @@ function Write-LogEntry {
     Write-Host $LogMessage -ForegroundColor $ForegroundColor
 }
 
-function Load-Configuration {
+function Import-Configuration {
     <#
     .SYNOPSIS
     Lädt die Konfiguration aus der Config-Datei
@@ -172,7 +172,7 @@ function Save-Configuration {
     param(
         [Parameter(Mandatory=$true)]
         [string]$SMTPServer,
-        [string]$SMTPPort = 25,
+        [int]$SMTPPort = 25,
         [string]$From,
         [string]$To,
         [bool]$UseSSL = $false
@@ -180,28 +180,45 @@ function Save-Configuration {
     
     Write-LogEntry "Speichere Konfiguration..." -Level Info
     
-    $config = @"
-<?xml version="1.0" encoding="utf-8"?>
-<Configuration>
-  <SMTP>
-    <Server>$SMTPServer</Server>
-    <Port>$SMTPPort</Port>
-    <From>$From</From>
-    <To>$To</To>
-    <UseSSL>$UseSSL</UseSSL>
-  </SMTP>
-  <Backup>
-    <EventLogName>$EventLogName</EventLogName>
-    <EventSourceName>$EventSourceName</EventSourceName>
-    <SuccessEventId>$SuccessEventId</SuccessEventId>
-    <FailureEventId>$FailureEventId</FailureEventId>
-    <WarningEventId>$WarningEventId</WarningEventId>
-  </Backup>
-</Configuration>
-"@
-    
     try {
-        Set-Content -Path $ConfigFile -Value $config -Encoding UTF8
+                $xmlDoc = New-Object System.Xml.XmlDocument
+                $declaration = $xmlDoc.CreateXmlDeclaration("1.0", "utf-8", $null)
+                $null = $xmlDoc.AppendChild($declaration)
+
+                $root = $xmlDoc.CreateElement("Configuration")
+                $null = $xmlDoc.AppendChild($root)
+
+                $smtpNode = $xmlDoc.CreateElement("SMTP")
+                $null = $root.AppendChild($smtpNode)
+
+                foreach ($entry in @{
+                        Server = $SMTPServer
+                        Port = $SMTPPort
+                        From = $From
+                        To = $To
+                        UseSSL = $UseSSL
+                }.GetEnumerator()) {
+                        $node = $xmlDoc.CreateElement($entry.Key)
+                        $node.InnerText = [string]$entry.Value
+                        $null = $smtpNode.AppendChild($node)
+                }
+
+                $backupNode = $xmlDoc.CreateElement("Backup")
+                $null = $root.AppendChild($backupNode)
+
+                foreach ($entry in @{
+                        EventLogName = $EventLogName
+                        EventSourceName = $EventSourceName
+                        SuccessEventId = $SuccessEventId
+                        FailureEventId = $FailureEventId
+                        WarningEventId = $WarningEventId
+                }.GetEnumerator()) {
+                        $node = $xmlDoc.CreateElement($entry.Key)
+                        $node.InnerText = [string]$entry.Value
+                        $null = $backupNode.AppendChild($node)
+                }
+
+                $xmlDoc.Save($ConfigFile)
         Write-LogEntry "Konfiguration gespeichert: $ConfigFile" -Level Success
         return $true
     }
@@ -211,223 +228,307 @@ function Save-Configuration {
     }
 }
 
-function Get-BackupEventDetails {
+function Get-ServerLanguageContext {
     <#
     .SYNOPSIS
-    Ruft die Details eines Backup-Events vom Event Log ab
+    Ermittelt die Spracheinstellungen des Servers
     #>
-    param(
-        [Parameter(Mandatory=$true)]
-        [int]$EventId,
-        [int]$MaxEvents = 1
-    )
-    
-    Write-LogEntry "Suche Backup-Events mit ID $EventId..." -Level Info
-    
-    try {
-        $Events = Get-WinEvent -FilterHashtable @{
-            LogName = $EventLogName
-            Id = $EventId
-        } -MaxEvents $MaxEvents -ErrorAction SilentlyContinue
-        
-        if ($Events) {
-            Write-LogEntry "Gefundene Events: $($Events.Count)" -Level Info
-            return $Events
-        }
-        else {
-            Write-LogEntry "Keine Events mit ID $EventId gefunden" -Level Warning
-            return $null
-        }
-    }
-    catch {
-        Write-LogEntry "FEHLER beim Abrufen der Events: $_" -Level Error
-        return $null
+    $Culture = Get-Culture
+    $UICulture = Get-UICulture
+    $IsGerman = ($Culture.TwoLetterISOLanguageName -eq "de") -or ($UICulture.TwoLetterISOLanguageName -eq "de")
+
+    return [pscustomobject]@{
+        Culture = $Culture.Name
+        UICulture = $UICulture.Name
+        IsGerman = $IsGerman
     }
 }
 
-function Create-BackupEmailBody {
+function ConvertTo-HtmlSafe {
+    param(
+        [AllowNull()]
+        [string]$Value
+    )
+
+    return [System.Net.WebUtility]::HtmlEncode($Value)
+}
+
+function Get-RelevantBackupEvents {
     <#
     .SYNOPSIS
-    Erstellt den E-Mail-Body für Backup-Berichte
+    Sucht relevante Backup-Ereignisse in Backup-, Application- und System-Logs
     #>
     param(
         [Parameter(Mandatory=$true)]
-        $Event,
+        [datetime]$Since,
         [Parameter(Mandatory=$true)]
-        [ValidateSet("Success", "Failure", "Warning")]
-        [string]$Status
+        [datetime]$Until,
+        [Parameter(Mandatory=$true)]
+        $LanguageContext
     )
-    
-    $ComputerName = $env:COMPUTERNAME
-    $EventTime = $Event.TimeCreated
-    $EventMessage = $Event.Message
-    
-    $StatusColor = switch ($Status) {
-        "Success" { "[OK] Erfolgreich" }
-        "Failure" { "[FEHLER] Fehlgeschlagen" }
-        "Warning" { "[WARNUNG] Mit Fehlern abgeschlossen" }
+
+    $logsToScan = @($EventLogName, "Application", "System")
+    $providerRegex = "(?i)wbengine|backup|volsnap|vss|shadow copy|sicherung|snap"
+    $keywordRegex = if ($LanguageContext.IsGerman) {
+        "(?i)backup|sicherung|sicherungsvorgang|volumenschattenkopie|vss|wbadmin|wbengine|volsnap"
     }
-    
-    $Body = @"
+    else {
+        "(?i)backup|volume shadow copy|shadow copy|vss|wbadmin|wbengine|volsnap"
+    }
+
+    $result = New-Object System.Collections.Generic.List[object]
+
+    foreach ($logName in $logsToScan) {
+        Write-LogEntry "Suche relevante Ereignisse in Log '$logName' zwischen $Since und $Until" -Level Info
+
+        try {
+            $logEvents = Get-WinEvent -FilterHashtable @{
+                LogName = $logName
+                StartTime = $Since
+                EndTime = $Until
+            } -ErrorAction Stop
+        }
+        catch {
+            Write-LogEntry "Log '$logName' kann nicht gelesen werden: $_" -Level Warning
+            continue
+        }
+
+        foreach ($evt in $logEvents) {
+            $provider = [string]$evt.ProviderName
+            $message = [string]$evt.Message
+            $include = $false
+            $status = "Info"
+
+            if ($logName -eq $EventLogName -and $evt.Id -in @($SuccessEventId, $FailureEventId, $WarningEventId)) {
+                $include = $true
+                $status = switch ($evt.Id) {
+                    $SuccessEventId { "Success" }
+                    $FailureEventId { "Failure" }
+                    $WarningEventId { "Warning" }
+                    default { "Info" }
+                }
+            }
+            else {
+                if ($provider -match $providerRegex -or $message -match $keywordRegex) {
+                    $include = $true
+                }
+
+                if ($include) {
+                    if ($evt.LevelDisplayName -match "(?i)error|critical|fehler|kritisch") {
+                        $status = "Failure"
+                    }
+                    elseif ($evt.LevelDisplayName -match "(?i)warning|warnung") {
+                        $status = "Warning"
+                    }
+                    else {
+                        $status = "Info"
+                    }
+                }
+            }
+
+            if ($include) {
+                $result.Add([pscustomobject]@{
+                    TimeCreated = $evt.TimeCreated
+                    LogName = $evt.LogName
+                    Id = $evt.Id
+                    ProviderName = $provider
+                    Level = [string]$evt.LevelDisplayName
+                    Status = $status
+                    Message = $message
+                    RecordId = $evt.RecordId
+                })
+            }
+        }
+    }
+
+    return $result | Sort-Object TimeCreated
+}
+
+function Get-OverallBackupStatus {
+    param(
+        [Parameter(Mandatory=$true)]
+        [array]$Events
+    )
+
+    if (-not $Events -or $Events.Count -eq 0) {
+        return "Success"
+    }
+
+    if ($Events.Status -contains "Failure") {
+        return "Failure"
+    }
+    if ($Events.Status -contains "Warning") {
+        return "Warning"
+    }
+
+    return "Success"
+}
+
+function New-BackupSummaryEmailBody {
+    <#
+    .SYNOPSIS
+    Erstellt eine HTML-Zusammenfassung der relevanten Ereignisse der letzten Stunde
+    #>
+    param(
+        [Parameter(Mandatory=$true)]
+        [array]$Events,
+        [Parameter(Mandatory=$true)]
+        [datetime]$WindowStart,
+        [Parameter(Mandatory=$true)]
+        [datetime]$WindowEnd,
+        [Parameter(Mandatory=$true)]
+        $LanguageContext
+    )
+
+    $computerName = $env:COMPUTERNAME
+    $eventCount = $Events.Count
+    $failureCount = @($Events | Where-Object { $_.Status -eq "Failure" }).Count
+    $warningCount = @($Events | Where-Object { $_.Status -eq "Warning" }).Count
+    $successCount = @($Events | Where-Object { $_.Status -eq "Success" -or $_.Status -eq "Info" }).Count
+
+    $rows = foreach ($evt in $Events) {
+        $cssClass = switch ($evt.Status) {
+            "Failure" { "failure" }
+            "Warning" { "warning" }
+            default { "success" }
+        }
+
+        $msg = ($evt.Message -replace "\r?\n", " ").Trim()
+        if ($msg.Length -gt 220) {
+            $msg = $msg.Substring(0, 220) + "..."
+        }
+
+        "<tr class='$cssClass'><td>$($evt.TimeCreated)</td><td>$(ConvertTo-HtmlSafe -Value $evt.LogName)</td><td>$($evt.Id)</td><td>$(ConvertTo-HtmlSafe -Value $evt.ProviderName)</td><td>$(ConvertTo-HtmlSafe -Value $evt.Level)</td><td>$(ConvertTo-HtmlSafe -Value $msg)</td></tr>"
+    }
+
+    if (-not $rows) {
+        $rows = "<tr><td colspan='6'>Keine relevanten Ereignisse in der letzten Stunde gefunden.</td></tr>"
+    }
+
+    $languageNotice = if ($LanguageContext.IsGerman) {
+        "Systemsprache erkannt: Deutsch ($($LanguageContext.Culture) / $($LanguageContext.UICulture))"
+    }
+    else {
+        "System language detected: Non-German ($($LanguageContext.Culture) / $($LanguageContext.UICulture))"
+    }
+
+    return @"
 <!DOCTYPE html>
 <html>
 <head>
     <meta charset="UTF-8">
     <style>
         body { font-family: Arial, sans-serif; color: #333; }
-        .header { background-color: #0078d4; color: white; padding: 20px; border-radius: 5px 5px 0 0; }
-        .content { padding: 20px; border: 1px solid #ddd; border-radius: 0 0 5px 5px; }
-        .status { padding: 10px; margin: 10px 0; border-radius: 3px; }
-        .success { background-color: #d4edda; border-left: 4px solid #28a745; color: #155724; }
-        .failure { background-color: #f8d7da; border-left: 4px solid #dc3545; color: #721c24; }
-        .warning { background-color: #fff3cd; border-left: 4px solid #ffc107; color: #856404; }
-        .details { background-color: #f5f5f5; padding: 10px; border-radius: 3px; font-family: monospace; white-space: pre-wrap; word-wrap: break-word; }
-        table { width: 100%; border-collapse: collapse; margin: 10px 0; }
-        th { background-color: #f0f0f0; padding: 8px; text-align: left; border-bottom: 2px solid #ddd; }
-        td { padding: 8px; border-bottom: 1px solid #ddd; }
-        .footer { margin-top: 20px; padding-top: 10px; border-top: 1px solid #ddd; font-size: 12px; color: #666; }
+        .header { background-color: #0a5a9c; color: white; padding: 18px; border-radius: 6px 6px 0 0; }
+        .content { border: 1px solid #ddd; border-top: none; padding: 18px; border-radius: 0 0 6px 6px; }
+        .summary { display: flex; gap: 14px; margin: 12px 0 16px 0; }
+        .badge { padding: 8px 10px; border-radius: 4px; font-size: 13px; font-weight: bold; }
+        .ok { background-color: #d4edda; color: #155724; }
+        .warn { background-color: #fff3cd; color: #856404; }
+        .fail { background-color: #f8d7da; color: #721c24; }
+        table { width: 100%; border-collapse: collapse; margin-top: 12px; }
+        th, td { border-bottom: 1px solid #ddd; padding: 8px; text-align: left; vertical-align: top; }
+        th { background-color: #f3f3f3; }
+        tr.success td { background-color: #f7fff9; }
+        tr.warning td { background-color: #fffbef; }
+        tr.failure td { background-color: #fff5f5; }
+        .meta { margin-top: 14px; font-size: 12px; color: #666; }
     </style>
 </head>
 <body>
     <div class="header">
-        <h2>Windows Backup Report</h2>
-        <p>Server: $ComputerName</p>
+        <h2>Windows Backup Report (Hourly Summary)</h2>
+        <p>Server: $computerName</p>
     </div>
     <div class="content">
-        <div class="status $(if ($Status -eq 'Success') { 'success' } elseif ($Status -eq 'Failure') { 'failure' } else { 'warning' })">
-            <strong>Status: $StatusColor</strong>
+        <p>Auswertungszeitraum: $($WindowStart.ToString('yyyy-MM-dd HH:mm:ss')) bis $($WindowEnd.ToString('yyyy-MM-dd HH:mm:ss'))</p>
+        <div class="summary">
+            <span class="badge ok">OK/Info: $successCount</span>
+            <span class="badge warn">Warnungen: $warningCount</span>
+            <span class="badge fail">Fehler: $failureCount</span>
+            <span class="badge">Gesamt: $eventCount</span>
         </div>
-        
         <table>
             <tr>
-                <th>Eigenschaft</th>
-                <th>Wert</th>
+                <th>Zeit</th>
+                <th>Log</th>
+                <th>ID</th>
+                <th>Quelle</th>
+                <th>Level</th>
+                <th>Nachricht (gekürzt)</th>
             </tr>
-            <tr>
-                <td>Zeitstempel</td>
-                <td>$EventTime</td>
-            </tr>
-            <tr>
-                <td>Event-ID</td>
-                <td>$($Event.Id)</td>
-            </tr>
-            <tr>
-                <td>Computer</td>
-                <td>$ComputerName</td>
-            </tr>
-            <tr>
-                <td>Quelle</td>
-                <td>$($Event.ProviderName)</td>
-            </tr>
+            $($rows -join "`n")
         </table>
-        
-        <h3>Event Details:</h3>
-        <div class="details">
-$EventMessage
-        </div>
-        
-        <div class="footer">
-            <p>Dieses Skript wurde um $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') ausgeführt.</p>
+        <div class="meta">
+            <p>$languageNotice</p>
             <p>Windows Server Backup Monitoring v$ScriptVersion</p>
         </div>
     </div>
 </body>
 </html>
 "@
-    
-    return $Body
 }
 
-function Send-BackupEmailReport {
+function Send-BackupSummaryEmailReport {
     <#
     .SYNOPSIS
-    Versendet einen Backup-Bericht per E-Mail
+    Versendet die stündliche Zusammenfassung relevanter Backup-Ereignisse
     #>
     param(
         [Parameter(Mandatory=$true)]
         [string]$SMTPServer,
-        [string]$SMTPPort = 25,
+        [int]$SMTPPort = 25,
         [Parameter(Mandatory=$true)]
         [string]$From,
         [Parameter(Mandatory=$true)]
         [string]$To,
         [Parameter(Mandatory=$true)]
-        $Event,
+        [array]$Events,
         [Parameter(Mandatory=$true)]
-        [ValidateSet("Success", "Failure", "Warning")]
-        [string]$Status,
+        [datetime]$WindowStart,
+        [Parameter(Mandatory=$true)]
+        [datetime]$WindowEnd,
+        [Parameter(Mandatory=$true)]
+        $LanguageContext,
         [PSCredential]$Credential,
         [bool]$UseSSL = $false
     )
-    
-    Write-LogEntry "Vorbereitung E-Mail-Versand für Status: $Status..." -Level Info
-    
+
+    $overallStatus = Get-OverallBackupStatus -Events $Events
+    $computerName = $env:COMPUTERNAME
+    $subjectPrefix = switch ($overallStatus) {
+        "Failure" { "[FEHLER]" }
+        "Warning" { "[WARNUNG]" }
+        default { "[OK]" }
+    }
+
+    $subject = "$subjectPrefix Windows Backup Stundenauswertung - $computerName ($($Events.Count) Ereignis(se))"
+    $body = New-BackupSummaryEmailBody -Events $Events -WindowStart $WindowStart -WindowEnd $WindowEnd -LanguageContext $LanguageContext
+
+    $mailParams = @{
+        SmtpServer  = $SMTPServer
+        Port        = $SMTPPort
+        From        = $From
+        To          = $To
+        Subject     = $subject
+        Body        = $body
+        BodyAsHtml  = $true
+        ErrorAction = "Stop"
+        UseSsl      = $UseSSL
+    }
+
+    if ($Credential) {
+        $mailParams["Credential"] = $Credential
+    }
+
     try {
-        $ComputerName = $env:COMPUTERNAME
-        
-        $Subject = switch ($Status) {
-            "Success" { "[OK] Windows Backup erfolgreich - $ComputerName" }
-            "Failure" { "[FEHLER] Windows Backup fehlgeschlagen - $ComputerName" }
-            "Warning" { "[WARNUNG] Windows Backup mit Fehlern - $ComputerName" }
-        }
-        
-        $Body = Create-BackupEmailBody -Event $Event -Status $Status
-        
-        $MailParams = @{
-            SmtpServer    = $SMTPServer
-            Port          = $SMTPPort
-            From          = $From
-            To            = $To
-            Subject       = $Subject
-            Body          = $Body
-            BodyAsHtml    = $true
-            ErrorAction   = "Stop"
-            UseSsl        = $false
-        }
-        
-        if ($Credential) {
-            $MailParams["Credential"] = $Credential
-        }
-        
-        Send-MailMessage @MailParams
-        Write-LogEntry "E-Mail erfolgreich versendet an: $To" -Level Success
+        Send-MailMessage @mailParams
+        Write-LogEntry "Zusammenfassungs-E-Mail erfolgreich versendet an: $To" -Level Success
         return $true
     }
     catch {
-        Write-LogEntry "FEHLER beim E-Mail-Versand: $_" -Level Error
+        Write-LogEntry "FEHLER beim E-Mail-Versand der Zusammenfassung: $_" -Level Error
         return $false
-    }
-}
-
-function Get-LatestBackupEvent {
-    <#
-    .SYNOPSIS
-    Ruft das neueste Backup-Event ab
-    #>
-    param(
-        [int]$EventId
-    )
-    
-    Write-LogEntry "Suche das neueste Event mit ID $EventId..." -Level Info
-    
-    try {
-        $Event = Get-WinEvent -FilterHashtable @{
-            LogName = $EventLogName
-            Id = $EventId
-        } -MaxEvents 1 -ErrorAction SilentlyContinue
-        
-        if ($Event) {
-            Write-LogEntry "Event gefunden vom $(($Event).TimeCreated)" -Level Success
-            return $Event
-        }
-        else {
-            Write-LogEntry "Kein Event mit ID $EventId gefunden" -Level Warning
-            return $null
-        }
-    }
-    catch {
-        Write-LogEntry "FEHLER beim Abrufen des Events: $_" -Level Error
-        return $null
     }
 }
 
@@ -439,7 +540,7 @@ function Invoke-BackupMonitoring {
     param(
         [Parameter(Mandatory=$true)]
         [string]$SMTPServer,
-        [string]$SMTPPort = 25,
+        [int]$SMTPPort = 25,
         [Parameter(Mandatory=$true)]
         [string]$From,
         [Parameter(Mandatory=$true)]
@@ -448,55 +549,30 @@ function Invoke-BackupMonitoring {
         [bool]$UseSSL = $false
     )
     
-    Write-LogEntry "Starte Backup-Überwachung..." -Level Info
-    
-    # Prüfe auf erfolgreiche Backups
-    Write-LogEntry "Prüfe auf erfolgreiche Backups..." -Level Info
-    $SuccessEvent = Get-LatestBackupEvent -EventId $SuccessEventId
-    
-    if ($SuccessEvent) {
-        $EventTime = $SuccessEvent.TimeCreated
-        $CheckTime = (Get-Date).AddMinutes(-5)
-        
-        if ($EventTime -gt $CheckTime) {
-            Write-LogEntry "Aktuelles erfolgreiches Backup-Event gefunden" -Level Info
-            Send-BackupEmailReport -SMTPServer $SMTPServer -SMTPPort $SMTPPort `
-                -From $From -To $To -Event $SuccessEvent `
-                -Status "Success" -Credential $Credential -UseSSL $UseSSL
-        }
+    Write-LogEntry "Starte stündliche Backup-Überwachung..." -Level Info
+
+    $windowEnd = Get-Date
+    $windowStart = $windowEnd.AddHours(-1)
+    $languageContext = Get-ServerLanguageContext
+
+    Write-LogEntry "Server-Sprache: $($languageContext.Culture) / UI: $($languageContext.UICulture)" -Level Info
+    if ($languageContext.IsGerman) {
+        Write-LogEntry "Deutsches System erkannt - deutsche und englische Backup-Muster werden berücksichtigt" -Level Info
     }
-    
-    # Prüfe auf fehlgeschlagene Backups
-    Write-LogEntry "Prüfe auf fehlgeschlagene Backups..." -Level Info
-    $FailureEvent = Get-LatestBackupEvent -EventId $FailureEventId
-    
-    if ($FailureEvent) {
-        $EventTime = $FailureEvent.TimeCreated
-        $CheckTime = (Get-Date).AddMinutes(-5)
-        
-        if ($EventTime -gt $CheckTime) {
-            Write-LogEntry "Aktuelles fehlgeschlagenes Backup-Event gefunden" -Level Info
-            Send-BackupEmailReport -SMTPServer $SMTPServer -SMTPPort $SMTPPort `
-                -From $From -To $To -Event $FailureEvent `
-                -Status "Failure" -Credential $Credential -UseSSL $UseSSL
-        }
+    else {
+        Write-LogEntry "Nicht-deutsches System erkannt - englische Backup-Muster werden berücksichtigt" -Level Info
     }
-    
-    # Prüfe auf Backups mit Fehlern
-    Write-LogEntry "Prüfe auf Backups mit Fehlern..." -Level Info
-    $WarningEvent = Get-LatestBackupEvent -EventId $WarningEventId
-    
-    if ($WarningEvent) {
-        $EventTime = $WarningEvent.TimeCreated
-        $CheckTime = (Get-Date).AddMinutes(-5)
-        
-        if ($EventTime -gt $CheckTime) {
-            Write-LogEntry "Aktuelles Backup-Event mit Fehlern gefunden" -Level Info
-            Send-BackupEmailReport -SMTPServer $SMTPServer -SMTPPort $SMTPPort `
-                -From $From -To $To -Event $WarningEvent `
-                -Status "Warning" -Credential $Credential -UseSSL $UseSSL
-        }
+
+    $events = Get-RelevantBackupEvents -Since $windowStart -Until $windowEnd -LanguageContext $languageContext
+    Write-LogEntry "Relevante Ereignisse im letzten Zeitraum gefunden: $($events.Count)" -Level Info
+
+    if ($events.Count -gt 1) {
+        Write-LogEntry "Hinweis: Es wurden mehrere relevante Ereignisse in der letzten Stunde gefunden (normalerweise wird nur ein Abschlussereignis erwartet)." -Level Warning
     }
+
+    $null = Send-BackupSummaryEmailReport -SMTPServer $SMTPServer -SMTPPort $SMTPPort `
+        -From $From -To $To -Events $events -WindowStart $windowStart -WindowEnd $windowEnd `
+        -LanguageContext $languageContext -Credential $Credential -UseSSL $UseSSL
 }
 
 function New-BackupMonitorTask {
@@ -508,12 +584,7 @@ function New-BackupMonitorTask {
         [Parameter(Mandatory=$true)]
         [string]$TaskName,
         [Parameter(Mandatory=$true)]
-        [string]$ScriptPath,
-        [string]$SMTPServer,
-        [Parameter(Mandatory=$true)]
-        [string]$From,
-        [Parameter(Mandatory=$true)]
-        [string]$To
+        [string]$ScriptPath
     )
     
     Write-LogEntry "Beginne Erstellung des Scheduled Tasks: $TaskName" -Level Info
@@ -535,7 +606,7 @@ function New-BackupMonitorTask {
     # Erstelle die Task Action
     $TaskScript = @"
 # Parameter für das Backup-Monitoring-Skript
-& '$ScriptPath' -SMTPServer '$SMTPServer' -From '$From' -To '$To'
+& '$ScriptPath'
 "@
     
     $TaskScript | Out-File -FilePath "$PSScriptRoot\BackupMonitorTask.ps1" -Encoding UTF8 -Force
@@ -554,71 +625,27 @@ function New-BackupMonitorTask {
             -DontStopIfGoingOnBatteries `
             -MultipleInstances IgnoreNew
         
-        Write-LogEntry "Erstelle Scheduled Task mit Event-Triggern..." -Level Info
-        
-        # Erstelle zuerst einen dummy-Trigger (wird später durch XML ersetzt)
-        $DummyTrigger = New-ScheduledTaskTrigger -AtLogon
-        
-        # Registriere den Task zuerst mit Dummy-Trigger
-        $Task = Register-ScheduledTask `
+        Write-LogEntry "Erstelle Scheduled Task mit stündlichem Trigger..." -Level Info
+
+        $TaskTrigger = New-ScheduledTaskTrigger `
+            -Daily `
+            -At "00:00" `
+            -RepetitionInterval (New-TimeSpan -Hours 1) `
+            -RepetitionDuration (New-TimeSpan -Days 1)
+
+        # Registriere den Task mit stündlichem Trigger
+        $null = Register-ScheduledTask `
             -TaskName $TaskName `
             -Action $TaskAction `
-            -Trigger $DummyTrigger `
+            -Trigger $TaskTrigger `
             -Settings $TaskSettings `
-            -Description "Überwacht Windows Backup Events und versendet E-Mail-Benachrichtigungen" `
+            -Description "Prüft stündlich Windows Backup Logs und versendet eine E-Mail-Zusammenfassung" `
             -RunLevel Highest `
             -ErrorAction Stop
-        
-        Write-LogEntry "Basis-Task erstellt, füge Event-Trigger hinzu..." -Level Info
-        
-        # Nutze TaskScheduler COM-API für Event-basierte Trigger (PowerShell 7 kompatibel)
-        try {
-            $TaskScheduler = New-Object -ComObject "Schedule.Service"
-            $TaskScheduler.Connect()
-            
-            $RootFolder = $TaskScheduler.GetFolder("\")
-            $ScheduledTask = $RootFolder.GetTask($TaskName)
-            $Definition = $ScheduledTask.Definition
-            
-            # Entferne den Dummy-Trigger
-            while ($Definition.Triggers.Count -gt 0) {
-                $Definition.Triggers.Remove(1)
-            }
-            
-            # Erstelle Event Trigger 1: Success (Event ID 4)
-            $EventTrigger1 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger1.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=4)]]</Select></Query></QueryList>"
-            $EventTrigger1.Enabled = $true
-            $EventTrigger1.Id = "EventTrigger_Success"
-            
-            # Erstelle Event Trigger 2: Failure (Event ID 12)
-            $EventTrigger2 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger2.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=12)]]</Select></Query></QueryList>"
-            $EventTrigger2.Enabled = $true
-            $EventTrigger2.Id = "EventTrigger_Failure"
-            
-            # Erstelle Event Trigger 3: Warning (Event ID 8)
-            $EventTrigger3 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger3.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=8)]]</Select></Query></QueryList>"
-            $EventTrigger3.Enabled = $true
-            $EventTrigger3.Id = "EventTrigger_Warning"
-            
-            # Speichere die aktualisierte Task-Definition
-            $RootFolder.RegisterTaskDefinition($TaskName, $Definition, 6, $null, $null, 3) | Out-Null
-            
-            Write-LogEntry "Scheduled Task '$TaskName' erfolgreich erstellt" -Level Success
-            Write-LogEntry "Event-Trigger automatisch hinzugefügt:" -Level Success
-            Write-LogEntry "  [+] Event ID 4 (erfolgreicher Backup)" -Level Success
-            Write-LogEntry "  [+] Event ID 12 (fehlgeschlagener Backup)" -Level Success
-            Write-LogEntry "  [+] Event ID 8 (Backup mit Fehlern)" -Level Success
-            
-            return $true
-        }
-        catch {
-            Write-LogEntry "FEHLER beim Konfigurieren der Event-Trigger via COM: $_" -Level Error
-            Write-LogEntry "Der Task wurde erstellt, aber die Event-Trigger müssen manuell konfiguriert werden." -Level Warning
-            return $true
-        }
+
+        Write-LogEntry "Scheduled Task '$TaskName' erfolgreich erstellt" -Level Success
+        Write-LogEntry "Trigger: stündlich (alle 60 Minuten)" -Level Success
+        return $true
     }
     catch {
         Write-LogEntry "FEHLER beim Erstellen des Scheduled Tasks: $_" -Level Error
@@ -666,17 +693,11 @@ try {
         # Erstelle den Task
         $TaskCreated = New-BackupMonitorTask `
             -TaskName $TaskName `
-            -ScriptPath $PSCommandPath `
-            -SMTPServer $SMTPServer `
-            -From $From `
-            -To $To
+            -ScriptPath $PSCommandPath
         
         if ($TaskCreated) {
             Write-LogEntry "Scheduled Task wurde erfolgreich erstellt und konfiguriert!" -Level Success
-            Write-LogEntry "Der Task wird sofort bei den folgenden Backups ausgelöst:" -Level Info
-            Write-LogEntry "  • Wenn ein Backup erfolgreich abgeschlossen wird" -Level Info
-            Write-LogEntry "  • Wenn ein Backup fehlschlägt" -Level Info
-            Write-LogEntry "  • Wenn ein Backup mit Fehlern abgeschlossen wird" -Level Info
+            Write-LogEntry "Der Task läuft stündlich und versendet eine Zusammenfassung der letzten Stunde." -Level Info
         }
         else {
             Write-LogEntry "FEHLER: Scheduled Task konnte nicht erstellt werden" -Level Error
@@ -689,7 +710,7 @@ try {
     Write-LogEntry "Starte normale Überwachung..." -Level Info
     
     # Lade oder verwende übergebene Konfiguration
-    $Config = Load-Configuration
+    $Config = Import-Configuration
     
     if ($Config) {
         $SMTPServer = if ($SMTPServer) { $SMTPServer } else { $Config.Configuration.SMTP.Server }

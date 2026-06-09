@@ -89,8 +89,26 @@ function Get-SMTPConfiguration {
     $Config.Server = $Server
     
     # SMTP-Port
-    $PortInput = Read-Host "SMTP-Port [25]"
-    $Config.Port = if ([string]::IsNullOrWhiteSpace($PortInput)) { 25 } else { [int]$PortInput }
+    do {
+        $PortInput = Read-Host "SMTP-Port [25]"
+
+        if ([string]::IsNullOrWhiteSpace($PortInput)) {
+            $Config.Port = 25
+            $ValidPort = $true
+        }
+        else {
+            $ParsedPort = 0
+            $ValidPort = [int]::TryParse($PortInput, [ref]$ParsedPort) -and $ParsedPort -ge 1 -and $ParsedPort -le 65535
+
+            if ($ValidPort) {
+                $Config.Port = $ParsedPort
+            }
+            else {
+                Write-Warning "Ungültiger SMTP-Port. Bitte geben Sie eine Zahl zwischen 1 und 65535 ein."
+            }
+        }
+    } while (-not $ValidPort)
+
     Write-Info "SMTP-Port: $($Config.Port)"
     
     # Von-Adresse
@@ -113,14 +131,15 @@ function Get-SMTPConfiguration {
     
     # SSL/TLS
     $SSLInput = Read-Host "SSL/TLS verwenden? (j/n) [n]"
-    $Config.UseSSL = $SSLInput -eq "j" -or $SSLInput -eq "yes"
+    $Config.UseSSL = $SSLInput -match '^(?i:j|ja|y|yes|true|1)$'
     Write-Info "SSL/TLS: $($Config.UseSSL)"
     
     # Anmeldedaten
     $AuthInput = Read-Host "SMTP-Authentifizierung erforderlich? (j/n) [n]"
-    if ($AuthInput -eq "j" -or $AuthInput -eq "yes") {
+    if ($AuthInput -match '^(?i:j|ja|y|yes|true|1)$') {
         Write-Info "Geben Sie Ihre SMTP-Anmeldedaten ein:"
         $Config.Credential = Get-Credential -Message "SMTP-Anmeldedaten" -UserName $Config.From
+        Write-Warning "Hinweis: SMTP-Anmeldedaten werden aus Sicherheitsgründen nicht im Scheduled Task gespeichert."
     }
     
     return $Config
@@ -134,6 +153,20 @@ function Test-SMTPConnection {
     Write-Info "Teste Verbindung zu SMTP-Server..."
     
     try {
+        $recipientList = @(
+            $Config.To.Split(";") |
+                ForEach-Object { $_.Trim() } |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
+
+        if ($recipientList.Count -eq 0) {
+            throw "Keine gültigen Empfängeradressen gefunden."
+        }
+
+        foreach ($recipient in $recipientList) {
+            $null = New-Object System.Net.Mail.MailAddress($recipient)
+        }
+
         $SMTPClient = New-Object Net.Mail.SmtpClient($Config.Server, $Config.Port)
         
         if ($Config.UseSSL) {
@@ -144,7 +177,7 @@ function Test-SMTPConnection {
             $SMTPClient.Credentials = $Config.Credential
         }
         
-        $SMTPClient.Send($Config.From, $Config.To.Split(";")[0].Trim(), "Test", "Test")
+        $SMTPClient.Send($Config.From, $recipientList[0], "Test", "Test")
         $SMTPClient.Dispose()
         
         Write-Success "SMTP-Verbindung erfolgreich!"
@@ -157,16 +190,32 @@ function Test-SMTPConnection {
     }
 }
 
-function Create-ScheduledTask {
+function Resolve-MainScriptPath {
+    $candidates = @(
+        (Join-Path -Path $PSScriptRoot -ChildPath "WindowsBackupReport.ps1"),
+        "c:\Scripts\GitHub\M365\Windows Server\WindowsBackupReport.ps1"
+    )
+
+    foreach ($candidate in $candidates) {
+        if (Test-Path -Path $candidate) {
+            return $candidate
+        }
+    }
+
+    return $null
+}
+
+function New-BackupMonitorTask {
     param($Config)
     
     Write-Header "Scheduled Task erstellen"
     
-    $ScriptPath = "c:\Scripts\GitHub\M365\Windows Server\WindowsBackupReport.ps1"
+    $ScriptPath = Resolve-MainScriptPath
     
     # Überprüfe, ob das Script existiert
-    if (-not (Test-Path -Path $ScriptPath)) {
-        Write-Error "WindowsBackupReport.ps1 nicht gefunden unter: $ScriptPath"
+    if ([string]::IsNullOrWhiteSpace($ScriptPath) -or -not (Test-Path -Path $ScriptPath)) {
+        Write-Error "WindowsBackupReport.ps1 konnte nicht gefunden werden."
+        Write-Info "Erwartete Pfade: $PSScriptRoot\WindowsBackupReport.ps1 oder c:\Scripts\GitHub\M365\Windows Server\WindowsBackupReport.ps1"
         return $false
     }
     
@@ -194,108 +243,37 @@ function Create-ScheduledTask {
         }
     }
     
-    # Konstruiere die Argumente
-    $Arguments = @(
-        "-NoProfile"
-        "-NoLogo"
-        "-NonInteractive"
-        "-ExecutionPolicy Bypass"
-        "-File `"$ScriptPath`""
-        "-SMTPServer `"$($Config.Server)`""
-        "-SMTPPort $($Config.Port)"
-        "-From `"$($Config.From)`""
-        "-To `"$($Config.To)`""
-    )
-    
-    if ($Config.UseSSL) {
-        $Arguments += "-UseSSL `$true"
-    }
-    
-    if ($Config.Credential) {
-        $Arguments += "-SMTPCredential (Get-Credential)"
-    }
-    
-    $ArgumentString = $Arguments -join " "
-    
+    Write-Info "Verwende Hauptscript: $ScriptPath"
+    Write-Info "Delegiere Task-Erstellung an das Hauptscript (stündlicher Trigger)."
+
     try {
-        # Erstelle Task-Aktion
-        $TaskAction = New-ScheduledTaskAction `
-            -Execute "powershell.exe" `
-            -Argument $ArgumentString
-        
-        # Erstelle Task-Einstellungen
-        $TaskSettings = New-ScheduledTaskSettingsSet `
-            -AllowStartIfOnBatteries `
-            -RunOnlyIfNetworkAvailable `
-            -StartWhenAvailable `
-            -DontStopIfGoingOnBatteries `
-            -MultipleInstances IgnoreNew
-        
-        Write-Info "Erstelle Scheduled Task mit Event-Triggern..."
-        
-        # Erstelle zuerst einen Dummy-Trigger
-        $DummyTrigger = New-ScheduledTaskTrigger -AtLogon
-        
-        # Registriere den Task zuerst
-        $Task = Register-ScheduledTask `
-            -TaskName $TaskName `
-            -Action $TaskAction `
-            -Trigger $DummyTrigger `
-            -Settings $TaskSettings `
-            -Description "Überwacht Windows Backup Events und versendet E-Mail-Benachrichtigungen" `
-            -RunLevel Highest `
-            -ErrorAction Stop
-        
-        # Nutze TaskScheduler COM-API für Event-Trigger (PowerShell 7 kompatibel)
-        try {
-            Write-Info "Konfiguriere Event-Trigger via TaskScheduler COM-API..."
-            
-            $TaskScheduler = New-Object -ComObject "Schedule.Service"
-            $TaskScheduler.Connect()
-            
-            $RootFolder = $TaskScheduler.GetFolder("\")
-            $ScheduledTask = $RootFolder.GetTask($TaskName)
-            $Definition = $ScheduledTask.Definition
-            
-            # Entferne den Dummy-Trigger
-            while ($Definition.Triggers.Count -gt 0) {
-                $Definition.Triggers.Remove(1)
-            }
-            
-            # Erstelle Event Trigger 1: Success (Event ID 4)
-            $EventTrigger1 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger1.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=4)]]</Select></Query></QueryList>"
-            $EventTrigger1.Enabled = $true
-            $EventTrigger1.Id = "EventTrigger_Success"
-            
-            # Erstelle Event Trigger 2: Failure (Event ID 12)
-            $EventTrigger2 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger2.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=12)]]</Select></Query></QueryList>"
-            $EventTrigger2.Enabled = $true
-            $EventTrigger2.Id = "EventTrigger_Failure"
-            
-            # Erstelle Event Trigger 3: Warning (Event ID 8)
-            $EventTrigger3 = $Definition.Triggers.Create(9)  # 9 = EventTrigger
-            $EventTrigger3.Subscription = "<QueryList><Query Id='0'><Select Path='Microsoft-Windows-Backup'>*[System[(EventID=8)]]</Select></Query></QueryList>"
-            $EventTrigger3.Enabled = $true
-            $EventTrigger3.Id = "EventTrigger_Warning"
-            
-            # Speichere die aktualisierte Definition
-            $RootFolder.RegisterTaskDefinition($TaskName, $Definition, 6, $null, $null, 3) | Out-Null
-            
-            Write-Success "Scheduled Task erfolgreich erstellt: $TaskName"
-            Write-Success "Event-Trigger automatisch hinzugefügt:"
-            Write-Host "  ✓ Event ID 4 (erfolgreicher Backup)" -ForegroundColor $SuccessColor
-            Write-Host "  ✓ Event ID 12 (fehlgeschlagener Backup)" -ForegroundColor $SuccessColor
-            Write-Host "  ✓ Event ID 8 (Backup mit Fehlern)" -ForegroundColor $SuccessColor
-            
-            return $true
+        $PowerShellExe = if (Get-Command pwsh -ErrorAction SilentlyContinue) { "pwsh" } else { "powershell.exe" }
+        $Arguments = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $ScriptPath,
+            "-CreateTask",
+            "-SMTPServer", $Config.Server,
+            "-SMTPPort", [string]$Config.Port,
+            "-From", $Config.From,
+            "-To", $Config.To,
+            "-TaskName", $TaskName
+        )
+
+        if ($Config.UseSSL) {
+            $Arguments += "-UseSSL"
         }
-        catch {
-            Write-Warning "Fehler beim Konfigurieren der Event-Trigger: $_"
-            Write-Info "Der Task wurde erstellt, aber die Event-Trigger müssen manuell konfiguriert werden."
-            return $true
+
+        $TaskProcess = Start-Process -FilePath $PowerShellExe -ArgumentList $Arguments -NoNewWindow -Wait -PassThru
+
+        if ($TaskProcess.ExitCode -ne 0) {
+            Write-Error "Task-Erstellung durch das Hauptscript fehlgeschlagen (ExitCode: $($TaskProcess.ExitCode))"
+            return $false
         }
+
+        Write-Success "Scheduled Task erfolgreich erstellt: $TaskName"
+        Write-Success "Trigger: stündlich (alle 60 Minuten)"
+        return $true
     }
     catch {
         Write-Error "Fehler beim Erstellen des Scheduled Tasks: $_"
@@ -321,9 +299,16 @@ function Show-Summary {
     Write-Host "  C:\Logs\WindowsBackup\" -ForegroundColor White
     Write-Host ""
     
+    $MainScriptPath = Resolve-MainScriptPath
+
     Write-Host "Script-Dateien:" -ForegroundColor $InfoColor
-    Write-Host "  Hauptscript: c:\Scripts\GitHub\M365\Windows Server\WindowsBackupReport.ps1" -ForegroundColor White
-    Write-Host "  Dokumentation: c:\Scripts\GitHub\M365\Windows Server\README_WindowsBackupReport.md" -ForegroundColor White
+    if ($MainScriptPath) {
+        Write-Host "  Hauptscript: $MainScriptPath" -ForegroundColor White
+    }
+    else {
+        Write-Host "  Hauptscript: nicht gefunden" -ForegroundColor $WarningColor
+    }
+    Write-Host "  Setup-Script: $PSCommandPath" -ForegroundColor White
     Write-Host ""
 }
 
@@ -353,7 +338,7 @@ try {
     if (-not $SkipTaskCreation) {
         $CreateTask = Read-Host "Scheduled Task erstellen? (j/n) [j]"
         if ($CreateTask -ne "n") {
-            $TaskCreated = Create-ScheduledTask -Config $SMTPConfig
+            $TaskCreated = New-BackupMonitorTask -Config $SMTPConfig
             
             if ($TaskCreated) {
                 Write-Success "Setup erfolgreich abgeschlossen!"
