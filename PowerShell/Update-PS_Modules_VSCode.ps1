@@ -22,7 +22,7 @@ $O365Modules = @("PackageManagement", "Microsoft.Graph", "Microsoft.Graph.Beta",
 # If the blocked version is already installed locally, it will be removed.
 # The script then automatically uses the newest allowed PSGallery version as target.
 $ModuleVersionBlockList = @{
-   "ExchangeOnlineManagement" = @("3.10.1")
+   "ExchangeOnlineManagement" = @("3.10.0")
 }
 
 #endregion Variables
@@ -131,6 +131,52 @@ function Remove-InstalledModuleFolder {
     Write-Host "Failed to remove folder $ModuleBasePath - Error: $psitem" -ForegroundColor Red
     return $false
   }
+}
+
+function Save-ModuleVersionToModulePath {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ModuleName,
+    [Parameter(Mandatory = $true)]
+    [version]$RequiredVersion,
+    [Parameter(Mandatory = $true)]
+    [string]$TempPath,
+    [Parameter(Mandatory = $true)]
+    [string]$TargetPath
+  )
+
+  if (Test-Path -Path $TempPath) {
+    Get-ChildItem -Path $TempPath -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+  }
+  else {
+    New-Item -Path $TempPath -ItemType Directory -Force | Out-Null
+  }
+
+  # Save to a writable temp folder first to avoid permission issues with dependency folders in Program Files.
+  Save-Module $ModuleName -Path $TempPath -RequiredVersion $RequiredVersion.ToString() -Force -Repository PSGallery -ErrorAction Stop -WarningAction Continue
+
+  # Copy only the requested module folder/version into the global module path.
+  $SavedModuleRoot = Join-Path -Path $TempPath -ChildPath $ModuleName
+  if (-not (Test-Path -Path $SavedModuleRoot)) {
+    throw "Saved module path was not found: $SavedModuleRoot"
+  }
+
+  $SavedVersions = Get-ChildItem -Path $SavedModuleRoot -Directory -ErrorAction Stop
+  $TargetModuleRoot = Join-Path -Path $TargetPath -ChildPath $ModuleName
+  if (-not (Test-Path -Path $TargetModuleRoot)) {
+    New-Item -Path $TargetModuleRoot -ItemType Directory -Force | Out-Null
+  }
+
+  foreach ($VersionFolder in $SavedVersions) {
+    $DestinationVersionPath = Join-Path -Path $TargetModuleRoot -ChildPath $VersionFolder.Name
+    if (Test-Path -Path $DestinationVersionPath) {
+      Remove-Item -Path $DestinationVersionPath -Recurse -Force -ErrorAction Stop
+    }
+    Copy-Item -Path $VersionFolder.FullName -Destination $TargetModuleRoot -Recurse -Force -ErrorAction Stop
+    Write-Host "Copy from $($VersionFolder.FullName) to $DestinationVersionPath completed successfully." -ForegroundColor Green
+  }
+
+  Get-ChildItem -Path $TempPath -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
 #endregion functions
 
@@ -258,13 +304,13 @@ ForEach ($Module in $O365Modules)
       Write-Host ("Installing module {0} version {1}..." -f $Module, $CurrentVersion.ToString())  -foregroundcolor Yellow
      #Install-Module $Module -Scope AllUsers -Confirm:$False -AllowClobber -Force -Repository PSGallery
      try {
-      Save-Module $Module -Path $psmodulepath -RequiredVersion $CurrentVersion.ToString() -Force -Repository PSGallery -ErrorAction Stop -WarningAction Continue
+      Save-ModuleVersionToModulePath -ModuleName $Module -RequiredVersion $CurrentVersion -TempPath $tempPsmodulepath -TargetPath $psmodulepath
       Write-Host "Module $Module installed in the common module folder." -ForegroundColor Green
+      $InstalledModules++
      }
      catch {
-      write-host "Module installation failed for $Module." -ForegroundColor Red
+      write-host "Module installation failed for $Module - Error: $psitem" -ForegroundColor Red
       }
-     $InstalledModules++
    }
 
    If ($PCModule -and $HighestInstalledVersion -eq $CurrentVersion)
@@ -281,35 +327,7 @@ ForEach ($Module in $O365Modules)
       Write-Host ("Installing latest allowed version of module. Installed Version: {0} ; Allowed PSGallery Version: {1}" -f $HighestInstalledVersion, $CurrentVersion) -ForegroundColor Green
       try
       {
-        if (Test-Path -Path $tempPsmodulepath) {
-          Get-ChildItem -Path $tempPsmodulepath -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-        }
-        else {
-          New-Item -Path $tempPsmodulepath -ItemType Directory -Force | Out-Null
-        }
-
-        # Save in temporary folder
-        Save-Module $Module -Path $tempPsmodulepath -RequiredVersion $CurrentVersion.ToString() -Force -Repository PSGallery -ErrorAction Stop -WarningAction Continue
-        # Copy to target module folder
-        $ModuleFolders = Get-ChildItem -Path $tempPsmodulepath -Directory
-
-        foreach ($entry in $ModuleFolders) {
-            $SourceModulePath = $entry.FullName
-            $DestinationModulePath = Join-Path -Path $psmodulepath -ChildPath $entry.Name
-
-            # Copy all contents recursively into destination module folder and overwrite existing files
-            try {
-              Copy-Item -Path "$SourceModulePath\*" -Destination $DestinationModulePath -Recurse -Force -WarningAction Continue -ErrorAction Stop
-              Write-Host "Copy from $SourceModulePath to $DestinationModulePath completed successfully." -ForegroundColor Green
-            }
-            catch {
-              Write-Host "Failed to copy from $SourceModulePath to $DestinationModulePath - Error: $PSItem" -ForegroundColor Red
-            }
-        }
-
-        # Remove temporary folders
-        Get-ChildItem -Path $tempPsmodulepath -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force
-
+        Save-ModuleVersionToModulePath -ModuleName $Module -RequiredVersion $CurrentVersion -TempPath $tempPsmodulepath -TargetPath $psmodulepath
         $UpdatedModules++
         Write-Host "New allowed module version of $Module has been deployed to the Modules folder."
       }
