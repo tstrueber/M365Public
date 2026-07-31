@@ -2,7 +2,10 @@
 # region Variables
 param(
   [switch]$PostPowerShellUpdateCheck,
-  [string]$ExpectedPowerShellVersion
+  [string]$ExpectedPowerShellVersion,
+  [switch]$UpdatePSOnly,
+  [switch]$UpdateModulesOnly,
+  [switch]$UpdateVSCodeOnly
 )
 
 $Logpath = "C:\Temp"
@@ -14,7 +17,7 @@ $tempPsmodulepath = "C:\Temp\InstallPSModules"
 # Define the set of modules installed and updated from the PowerShell Gallery that we want to maintain - edit this set of modules to include the modules 
 # you want to process.
 #$O365Modules = @("PackageManagement", "Az.Accounts", "Az.Automation", "AIPService", "Az.Keyvault", "MicrosoftTeams", "Microsoft.Graph", "Microsoft.Graph.Beta", "ExchangeOnlineManagement", "Microsoft.Online.Sharepoint.PowerShell", "ORCA",  "Pnp.PowerShell", "MSCommerce", "Microsoft365DSC", "MSAL.PS", "WhiteboardAdmin", "ImportExcel")
-$O365Modules = @("PackageManagement", "Microsoft.Graph", "Microsoft.Graph.Beta", "ExchangeOnlineManagement", "Pnp.PowerShell", "MSAL.PS", "ImportExcel")
+$O365Modules = @("PackageManagement", "AIPService", "MicrosoftTeams", "Microsoft.Graph", "Microsoft.Graph.Beta", "ExchangeOnlineManagement", "Microsoft.Online.Sharepoint.PowerShell", "ORCA",  "Pnp.PowerShell", "MSCommerce", "MSAL.PS", "WhiteboardAdmin", "ImportExcel")
 
 # Versions that must NOT be installed (per module). Optionally, "*" can be used as a global key.
 # Example:
@@ -178,6 +181,33 @@ function Save-ModuleVersionToModulePath {
 
   Get-ChildItem -Path $TempPath -Directory -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
 }
+
+function Invoke-PowerShellMsiInstall {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$InstallerPath,
+    [Parameter(Mandatory = $true)]
+    [string]$InstallLogPath
+  )
+
+  $msiArgs = @(
+    '/i', $InstallerPath,
+    '/quiet',
+    '/norestart',
+    '/l*v', $InstallLogPath,
+    'ADD_EXPLORER_CONTEXT_MENU_OPENPOWERSHELL=1',
+    'ADD_FILE_CONTEXT_MENU_RUNPOWERSHELL=1',
+    'ENABLE_PSREMOTING=1',
+    'REGISTER_MANIFEST=1',
+    'USE_MU=1',
+    'ENABLE_MU=1',
+    'ADD_PATH=1',
+    'DISABLE_TELEMETRY=1'
+  )
+
+  $process = Start-Process -FilePath 'msiexec.exe' -ArgumentList $msiArgs -Wait -PassThru
+  return $process.ExitCode
+}
 #endregion functions
 
 #region prerequisites
@@ -231,6 +261,21 @@ if ($PostPowerShellUpdateCheck) {
   Stop-Transcript
   exit 0
 }
+
+$HasScopedUpdateSelection = $UpdatePSOnly -or $UpdateModulesOnly -or $UpdateVSCodeOnly
+if ($HasScopedUpdateSelection) {
+  $RunPowerShellUpdate = [bool]$UpdatePSOnly
+  $RunModuleUpdate = [bool]$UpdateModulesOnly
+  $RunVSCodeUpdate = [bool]$UpdateVSCodeOnly
+}
+else {
+  # Default behavior: run all update parts when no scope parameter is specified.
+  $RunPowerShellUpdate = $true
+  $RunModuleUpdate = $true
+  $RunVSCodeUpdate = $true
+}
+
+Write-Host "Update selection -> Modules: $RunModuleUpdate ; VS Code: $RunVSCodeUpdate ; PowerShell: $RunPowerShellUpdate" -ForegroundColor Cyan
 #endregion prerequisites
 
 #region powershell modules
@@ -244,6 +289,7 @@ if ($PostPowerShellUpdateCheck) {
 
 [int]$InstalledModules = 0; [int]$UpdatedModules = 0; [int]$RemovedModules = 0
 
+if ($RunModuleUpdate) {
 Write-Host ("Starting up and preparing to process these modules: {0}" -f ($O365Modules -join ", ")) -foregroundcolor Yellow
 
 # We're installing from the PowerShell Gallery so make sure that it's trusted
@@ -389,6 +435,10 @@ ForEach ($Module in $ModulesToProcess)
 } #End ForEach
 
 Write-Host ("Installed modules: {0} Updated modules: {1}  Removed old versions of modules: {2}" -f $InstalledModules, $UpdatedModules, $RemovedModules)
+}
+else {
+  Write-Host "Skipping PowerShell module update (selection)." -ForegroundColor Yellow
+}
 
 # An example script used to illustrate a concept. More information about the topic can be found in the Office 365 for IT Pros eBook https://gum.co/O365IT/
 # and/or a relevant article on https://office365itpros.com or https://www.practical365.com. See our post about the Office 365 for IT Pros repository 
@@ -403,57 +453,62 @@ Write-Host ("Installed modules: {0} Updated modules: {1}  Removed old versions o
 #region vscode
 ########################################################################################################################################################################################
 
-Write-Host  ""
-Write-Host  ""
-Write-Host "########## Check whether a newer Visual Studio Code version is available" -ForegroundColor Cyan
-$GitHubversion = $null
-$localversion = $null
+if ($RunVSCodeUpdate) {
+  Write-Host  ""
+  Write-Host  ""
+  Write-Host "########## Check whether a newer Visual Studio Code version is available" -ForegroundColor Cyan
+  $GitHubversion = $null
+  $localversion = $null
 
-# Retrieve version (errors are handled inside the function)
-$GitHubversion = Get-GitHubVersion -url "https://github.com/microsoft/vscode/releases/latest"
+  # Retrieve version (errors are handled inside the function)
+  $GitHubversion = Get-GitHubVersion -url "https://github.com/microsoft/vscode/releases/latest"
 
-$localversion = (Get-ChildItem "C:\Program Files\Microsoft VS Code\Code.exe").VersionInfo.ProductVersion
-if($GitHubversion -eq "ERROR" -or [string]::IsNullOrWhiteSpace($GitHubversion)){
-  Write-Host "Failed to retrieve the current version from GitHub. Skipping update."
-}
-elseif($GitHubversion -ne $localversion) 
-{
-  Write-Host "Newer version found on GitHub: $GitHubversion"
-  Write-Host "Local version: $localversion"
-  Write-Host "Updating VS Code..."
-  # Define the download URL and the destination
-  $Destination = "$temppath\vscode_installer.exe"
-  $VSCodeUrl = "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64"
-
-  # Close any running instances of VS Code
-  Write-Host "Closing any running instances of VS Code..."
-  Get-Process -Name "Code" -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow(); Stop-Process -Id $_.Id -Force }
-
-  # Download VSCode installer
-  Write-Host "Downloading VS Code..."
-  Invoke-WebRequest -Uri $VSCodeUrl -OutFile $Destination -SkipCertificateCheck
-
-  # Install VS Code silently
-  Write-Host "Installing VS Code..."
-  try 
-  {
-    Start-Process -FilePath $Destination -ArgumentList '/verysilent /mergetasks=!runcode' -Wait -Passthru
-    Write-Host "VS Code installer completed successfully."
+  $localversion = (Get-ChildItem "C:\Program Files\Microsoft VS Code\Code.exe").VersionInfo.ProductVersion
+  if($GitHubversion -eq "ERROR" -or [string]::IsNullOrWhiteSpace($GitHubversion)){
+    Write-Host "Failed to retrieve the current version from GitHub. Skipping update."
   }
-  catch 
+  elseif($GitHubversion -ne $localversion) 
   {
-    Write-Host "Failed to run the VS Code installer."
+    Write-Host "Newer version found on GitHub: $GitHubversion"
+    Write-Host "Local version: $localversion"
+    Write-Host "Updating VS Code..."
+    # Define the download URL and the destination
+    $Destination = "$temppath\vscode_installer.exe"
+    $VSCodeUrl = "https://code.visualstudio.com/sha/download?build=stable&os=win32-x64"
+
+    # Close any running instances of VS Code
+    Write-Host "Closing any running instances of VS Code..."
+    Get-Process -Name "Code" -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow(); Stop-Process -Id $_.Id -Force }
+
+    # Download VSCode installer
+    Write-Host "Downloading VS Code..."
+    Invoke-WebRequest -Uri $VSCodeUrl -OutFile $Destination -SkipCertificateCheck
+
+    # Install VS Code silently
+    Write-Host "Installing VS Code..."
+    try 
+    {
+      Start-Process -FilePath $Destination -ArgumentList '/verysilent /mergetasks=!runcode' -Wait -Passthru
+      Write-Host "VS Code installer completed successfully."
+    }
+    catch 
+    {
+      Write-Host "Failed to run the VS Code installer."
+    }
+
+    # Remove installer
+    Write-Host "Removing installation file..."
+    Remove-Item $Destination
+
+    Write-Host "VS Code installation completed."
   }
-
-  # Remove installer
-  Write-Host "Removing installation file..."
-  Remove-Item $Destination
-
-  Write-Host "VS Code installation completed."
+  else 
+  {
+    Write-Host "Latest VS Code version is installed ($GitHubversion) - no update required." -ForegroundColor Green
+  }
 }
-else 
-{
-  Write-Host "Latest VS Code version is installed ($GitHubversion) - no update required." -ForegroundColor Green
+else {
+  Write-Host "Skipping VS Code update (selection)." -ForegroundColor Yellow
 }
 
 #endregion vscode
@@ -462,11 +517,13 @@ else
 ##############################################################################################################################################################################
 
 #endregion vscode extensions
-Write-Host "Current VS Code extension versions:"
-code --list-extensions --show-versions
+if ($RunVSCodeUpdate) {
+  Write-Host "Current VS Code extension versions:"
+  code --list-extensions --show-versions
 
-Write-Host "Starting VS Code extension update..."
-code --update-extensions
+  Write-Host "Starting VS Code extension update..."
+  code --update-extensions
+}
 
 #region powershell
 ##############################################################################################################################################################################
@@ -474,170 +531,126 @@ code --update-extensions
 Write-Host  ""
 Write-Host  ""
 Write-Host "############ Check whether a newer PowerShell version is available..."
-# Prefer winget when available.
-$WingetCommand = Get-Command -Name "winget.exe" -ErrorAction SilentlyContinue
-if ($WingetCommand) {
-  Write-Host "winget is available. Checking for a PowerShell upgrade..." -ForegroundColor Cyan
+if ($RunPowerShellUpdate) {
+  # Prefer winget when available.
+  $WingetCommand = Get-Command -Name "winget.exe" -ErrorAction SilentlyContinue
+  if ($WingetCommand) {
+    Write-Host "winget is available. Checking for a PowerShell upgrade..." -ForegroundColor Cyan
 
-  try {
-    Write-Host "Running: winget list --id Microsoft.PowerShell --upgrade-available"
-    $WingetListOutput = winget list --id Microsoft.PowerShell --upgrade-available 2>&1 | Out-String
-    if (-not [string]::IsNullOrWhiteSpace($WingetListOutput)) {
-      Write-Host $WingetListOutput.Trim()
-    }
-  }
-  catch {
-    Write-Host "winget check failed. Error: $PSItem" -ForegroundColor Red
-    $WingetListOutput = $null
-  }
-
-  if ($WingetListOutput -match "Microsoft\.PowerShell") {
-    Write-Host "PowerShell upgrade is available. Starting winget upgrade..." -ForegroundColor Yellow
     try {
-      Write-Host "Running: winget upgrade --id Microsoft.PowerShell"
-      winget upgrade --id Microsoft.PowerShell
-      if ($LASTEXITCODE -ne 0) {
-        throw "winget upgrade exited with code $LASTEXITCODE"
+      Write-Host "Running: winget list --id Microsoft.PowerShell --upgrade-available"
+      $WingetListOutput = winget list --id Microsoft.PowerShell --upgrade-available 2>&1 | Out-String
+      if (-not [string]::IsNullOrWhiteSpace($WingetListOutput)) {
+        Write-Host $WingetListOutput.Trim()
       }
-      Write-Host "PowerShell upgrade via winget completed." -ForegroundColor Green
     }
     catch {
-      Write-Host "PowerShell upgrade via winget failed. Error: $PSItem" -ForegroundColor Red
+      Write-Host "winget check failed. Error: $PSItem" -ForegroundColor Red
+      $WingetListOutput = $null
+    }
+
+    if ($WingetListOutput -match "Microsoft\.PowerShell") {
+      Write-Host "PowerShell upgrade is available. Starting winget upgrade..." -ForegroundColor Yellow
+      try {
+        Write-Host "Running: winget upgrade --id Microsoft.PowerShell"
+        winget upgrade --id Microsoft.PowerShell
+        if ($LASTEXITCODE -ne 0) {
+          throw "winget upgrade exited with code $LASTEXITCODE"
+        }
+        Write-Host "PowerShell upgrade via winget completed." -ForegroundColor Green
+      }
+      catch {
+        Write-Host "PowerShell upgrade via winget failed. Error: $PSItem" -ForegroundColor Red
+      }
+    }
+    else {
+      Write-Host "No newer PowerShell version found via winget." -ForegroundColor Green
     }
   }
   else {
-    Write-Host "No newer PowerShell version found via winget." -ForegroundColor Green
+    Write-Host "winget is not available. Falling back to the current PowerShell update procedure." -ForegroundColor Yellow
+
+    # Check if a newer PowerShell version is available
+    $GitHubversion = $null
+    $localversion = $null
+
+    # Retrieve version (errors are handled inside the function)
+    $GitHubversion = Get-GitHubVersion -url "https://github.com/PowerShell/PowerShell/releases/latest"
+
+    $localversion = $PSVersionTable.PSVersion.Major.ToString() +"."+ $PSVersionTable.PSVersion.Minor.ToString() +"."+ $PSVersionTable.PSVersion.Patch.ToString()
+    if($GitHubversion -eq "ERROR" -or [string]::IsNullOrWhiteSpace($GitHubversion)){
+      Write-Host "Failed to retrieve the current version from GitHub. Skipping update."
+    }
+    elseif($GitHubversion -ne $localversion) 
+    {
+      Write-Host "Newer version found on GitHub: $GitHubversion"
+      Write-Host "Local version: $localversion"
+      Write-Host "Updating PowerShell directly in this session..." -ForegroundColor Cyan
+
+      $installerFileName = "PowerShell-$GitHubversion-win-x64.msi"
+      $installerPath = Join-Path -Path $temppath -ChildPath $installerFileName
+      $installLogPath = Join-Path -Path $Logpath -ChildPath "$(Get-Date -format "yyyyMMdd_HHmmss")_PowerShell-$GitHubversion-msi-install.log"
+      $installerUrl = "https://github.com/PowerShell/PowerShell/releases/download/v$GitHubversion/$installerFileName"
+
+      Write-Host "Download URL: $installerUrl"
+      Write-Host "MSI install log: $installLogPath"
+
+      if (-not (Test-Path -Path $temppath)) {
+        New-Item -Path $temppath -ItemType Directory -Force | Out-Null
+      }
+
+      try {
+        Write-Host "Downloading PowerShell MSI..."
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -ErrorAction Stop
+
+        Write-Host "Installing PowerShell MSI..."
+        $msiExitCode = Invoke-PowerShellMsiInstall -InstallerPath $installerPath -InstallLogPath $installLogPath
+
+        if (($msiExitCode -ne 0) -and ($msiExitCode -ne 3010)) {
+          throw "msiexec.exe failed with exit code $msiExitCode. See $installLogPath for details."
+        }
+
+        if ($msiExitCode -eq 3010) {
+          Write-Host "MSI completed with exit code 3010 (restart required)." -ForegroundColor Yellow
+        }
+
+        $pwshCommand = Get-Command -Name "pwsh.exe" -ErrorAction SilentlyContinue
+        if (-not $pwshCommand) {
+          throw "pwsh.exe was not found after update attempt."
+        }
+
+        $installedVersionString = & $pwshCommand.Source -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
+        if (-not $installedVersionString) {
+          throw "Could not read installed PowerShell version from a fresh pwsh process."
+        }
+
+        [version]$installedVersion = $installedVersionString
+        [version]$requiredVersion = $GitHubversion
+
+        if ($installedVersion -lt $requiredVersion) {
+          throw "Installed version $installedVersion is lower than required version $requiredVersion. Check $installLogPath."
+        }
+
+        Write-Host "PowerShell update completed successfully. Installed version: $installedVersion" -ForegroundColor Green
+      }
+      catch {
+        Write-Host "PowerShell update failed. Error: $PSItem" -ForegroundColor Red
+        Write-Host "Check installer log: $installLogPath" -ForegroundColor Yellow
+      }
+      finally {
+        if (Test-Path -Path $installerPath) {
+          Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
+        }
+      }
+    }
+    else
+    {
+      Write-Host "Latest PowerShell version is installed ($GitHubversion) - no update required." -ForegroundColor Green
+    }
   }
 }
 else {
-  Write-Host "winget is not available. Falling back to the current PowerShell update procedure." -ForegroundColor Yellow
-
-  # Check if a newer PowerShell version is available
-  $GitHubversion = $null
-  $localversion = $null
-
-  # Retrieve version (errors are handled inside the function)
-  $GitHubversion = Get-GitHubVersion -url "https://github.com/PowerShell/PowerShell/releases/latest"
-
-  $localversion = $PSVersionTable.PSVersion.Major.ToString() +"."+ $PSVersionTable.PSVersion.Minor.ToString() +"."+ $PSVersionTable.PSVersion.Patch.ToString()
-  if($GitHubversion -eq "ERROR" -or [string]::IsNullOrWhiteSpace($GitHubversion)){
-    Write-Host "Failed to retrieve the current version from GitHub. Skipping update."
-  }
-  elseif($GitHubversion -ne $localversion) 
-  {
-    Write-Host "Newer version found on GitHub: $GitHubversion"
-    Write-Host "Local version: $localversion"
-    Write-Host "Updating PowerShell in a separate process..."
-
-    # The update is run in a separate Windows PowerShell process
-    # so the current pwsh session does not crash during MSI update.
-    $PowerShellUpdateLogPath = Join-Path -Path $Logpath -ChildPath "$(Get-Date -format "yyyyMMdd_HHmmss")_PowerShellUpdate.log"
-    $PowerShellUpdaterScriptPath = Join-Path -Path $env:TEMP -ChildPath "Update-PowerShell7-Detached.ps1"
-
-    $PowerShellUpdaterScript = @'
-param(
-  [Parameter(Mandatory = $true)]
-  [int]$ParentProcessId,
-  [Parameter(Mandatory = $true)]
-  [string]$TargetVersion,
-  [Parameter(Mandatory = $true)]
-  [string]$LogPath,
-  [Parameter(Mandatory = $true)]
-  [string]$MainScriptPath
-)
-
-$ErrorActionPreference = "Stop"
-
-function Write-UpdateLog {
-  param(
-    [string]$Message,
-    [string]$Level = "INFO"
-  )
-
-  $line = "$(Get-Date -Format \"yyyy-MM-dd HH:mm:ss\") [$Level] $Message"
-  Add-Content -Path $LogPath -Value $line
-}
-
-Write-UpdateLog -Message "Detached updater started. Waiting for parent process $ParentProcessId to exit."
-while (Get-Process -Id $ParentProcessId -ErrorAction SilentlyContinue) {
-  Start-Sleep -Seconds 2
-}
-
-try {
-  Write-UpdateLog -Message "Starting PowerShell installation via install-powershell.ps1"
-  & ([ScriptBlock]::Create((Invoke-RestMethod -Uri "https://aka.ms/install-powershell.ps1"))) -UseMSI -Quiet
-
-  # Short delay to ensure files/registry are stable after MSI setup.
-  Start-Sleep -Seconds 5
-
-  $pwshCommand = Get-Command -Name "pwsh.exe" -ErrorAction SilentlyContinue
-  if (-not $pwshCommand) {
-    throw "pwsh.exe was not found after the update."
-  }
-
-  $installedVersionString = & $pwshCommand.Source -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
-  if (-not $installedVersionString) {
-    throw "Could not read installed PowerShell version."
-  }
-
-  [version]$installedVersion = $installedVersionString
-  [version]$requiredVersion = $TargetVersion
-
-  if ($installedVersion -lt $requiredVersion) {
-    throw "Installed version $installedVersion is lower than required version $requiredVersion."
-  }
-
-  Write-UpdateLog -Message "PowerShell update successful. Installed version: $installedVersion"
-
-  $reRunArgs = @(
-    "-NoLogo",
-    "-NoProfile",
-    "-ExecutionPolicy", "Bypass",
-    "-File", $MainScriptPath,
-    "-PostPowerShellUpdateCheck",
-    "-ExpectedPowerShellVersion", $TargetVersion
-  )
-
-  Write-UpdateLog -Message "Starting main script rerun in pwsh for post-update validation."
-  $reRunProcess = Start-Process -FilePath $pwshCommand.Source -ArgumentList $reRunArgs -PassThru -Wait -WindowStyle Normal
-
-  if ($reRunProcess.ExitCode -ne 0) {
-    throw "Main script rerun failed with exit code $($reRunProcess.ExitCode)."
-  }
-
-  Write-UpdateLog -Message "Main script rerun finished successfully."
-  exit 0
-}
-catch {
-  Write-UpdateLog -Level "ERROR" -Message "PowerShell update failed: $($_.Exception.Message)"
-  exit 1
-}
-'@
-
-    Set-Content -Path $PowerShellUpdaterScriptPath -Value $PowerShellUpdaterScript -Encoding UTF8 -Force
-
-    $PowerShellUpdaterArgs = @(
-      "-NoProfile",
-      "-ExecutionPolicy", "Bypass",
-      "-File", $PowerShellUpdaterScriptPath,
-      "-ParentProcessId", $PID,
-      "-TargetVersion", $GitHubversion,
-      "-LogPath", $PowerShellUpdateLogPath,
-      "-MainScriptPath", $PSCommandPath
-    )
-
-    Start-Process -FilePath "powershell.exe" -ArgumentList $PowerShellUpdaterArgs -WindowStyle Hidden | Out-Null
-
-    Write-Host "PowerShell update has been started in the background."
-    Write-Host "Validation log: $PowerShellUpdateLogPath"
-    Write-Host "This script will now exit so the current pwsh instance does not block the update." -ForegroundColor Yellow
-    Stop-Transcript
-    exit 0
-  }
-  else
-  {
-    Write-Host "Latest PowerShell version is installed ($GitHubversion) - no update required." -ForegroundColor Green
-  }
+  Write-Host "Skipping PowerShell update (selection)." -ForegroundColor Yellow
 }
 
 #endregion powershell
