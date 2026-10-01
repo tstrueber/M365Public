@@ -1,4 +1,6 @@
 # Update PowerShell 7, common PowerShell modules, and VS Code
+# Version 2.1 - 2026-10-01
+# for the most recent version of the script check out the public github repository: https://github.com/tstrueber/M365Public/blob/main/PowerShell/Update-PS_Modules_VSCode.ps1
 # region Variables
 param(
   [switch]$PostPowerShellUpdateCheck,
@@ -8,11 +10,15 @@ param(
   [switch]$UpdateVSCodeOnly
 )
 
-$Logpath = "C:\Temp"
-$Scriptname = "Update_VSCode_PS_Modules"
+$ScriptPath = if ($PSCommandPath) { $PSCommandPath } 
+              elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } 
+              elseif ($psEditor) { $psEditor.GetEditorContext().CurrentFile.Path }
+$ScriptDirectory = Split-Path -Parent $ScriptPath
+$Logpath = join-path $ScriptDirectory "LOGS"
+$Scriptname = [System.IO.Path]::GetFileNameWithoutExtension($ScriptPath) # extract scriptname from $ScriptPath and remove the extension
 $temppath = "C:\Temp" #temp path for downloading the setup files
-$psmodulepath = "C:\Program Files\PowerShell\Modules"
-$tempPsmodulepath = "C:\Temp\InstallPSModules"
+$psmodulepath = "C:\Program Files\PowerShell\Modules" # where the updated PowerShell modules are installed
+$tempPsmodulepath = "C:\Temp\InstallPSModules" # temporary path for installing PowerShell modules
 
 # Define the set of modules installed and updated from the PowerShell Gallery that we want to maintain - edit this set of modules to include the modules 
 # you want to process.
@@ -215,6 +221,7 @@ function Invoke-PowerShellMsiInstall {
 
 Set-location $Logpath
 Start-Transcript -Path "$Logpath\$(Get-Date -format "yyyyMMdd_HHmmss")_$($Scriptname.Split(".")[0])_TS.LOG"
+$TranscriptActive = $true
 
 # check if we are running in VSCode
 if ($Host.Name -match 'Visual Studio Code') {
@@ -522,6 +529,7 @@ if ($RunVSCodeUpdate) {
   code --list-extensions --show-versions
 
   Write-Host "Starting VS Code extension update..."
+  Write-Host "The DeprecationWarning for VS Code extensions update may appear but can be safely ignored. If no update is available, you will see 'No extension to update'."
   code --update-extensions
 }
 
@@ -599,60 +607,40 @@ if ($RunPowerShellUpdate) {
         New-Item -Path $temppath -ItemType Directory -Force | Out-Null
       }
 
+      Write-Host "Downloading PowerShell MSI..."
       try {
-        Write-Host "Downloading PowerShell MSI..."
         Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -ErrorAction Stop
-
-        Write-Host "Installing PowerShell MSI..."
-        $msiExitCode = Invoke-PowerShellMsiInstall -InstallerPath $installerPath -InstallLogPath $installLogPath
-
-        if (($msiExitCode -ne 0) -and ($msiExitCode -ne 3010)) {
-          throw "msiexec.exe failed with exit code $msiExitCode. See $installLogPath for details."
-        }
-
-        if ($msiExitCode -eq 3010) {
-          Write-Host "MSI completed with exit code 3010 (restart required)." -ForegroundColor Yellow
-        }
-
-        $pwshCommand = Get-Command -Name "pwsh.exe" -ErrorAction SilentlyContinue
-        if (-not $pwshCommand) {
-          throw "pwsh.exe was not found after update attempt."
-        }
-
-        $installedVersionString = & $pwshCommand.Source -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
-        if (-not $installedVersionString) {
-          throw "Could not read installed PowerShell version from a fresh pwsh process."
-        }
-
-        [version]$installedVersion = $installedVersionString
-        [version]$requiredVersion = $GitHubversion
-
-        if ($installedVersion -lt $requiredVersion) {
-          throw "Installed version $installedVersion is lower than required version $requiredVersion. Check $installLogPath."
-        }
-
-        Write-Host "PowerShell update completed successfully. Installed version: $installedVersion" -ForegroundColor Green
+        Write-Host "PowerShell MSI download completed successfully." -ForegroundColor Green
       }
       catch {
-        Write-Host "PowerShell update failed. Error: $PSItem" -ForegroundColor Red
-        Write-Host "Check installer log: $installLogPath" -ForegroundColor Yellow
+        Write-Host "PowerShell MSI download failed. Error: $PSItem" -ForegroundColor Red
+        throw
       }
-      finally {
-        if (Test-Path -Path $installerPath) {
-          Remove-Item -Path $installerPath -Force -ErrorAction SilentlyContinue
-        }
+
+      Write-Host "Installing PowerShell MSI... Transcription will be stopped. For detailed logs, check the install log after the process completes."
+      Stop-Transcript
+      $TranscriptActive = $false
+      try {
+        Invoke-PowerShellMsiInstall -InstallerPath $installerPath -InstallLogPath $installLogPath
+        Write-Host "PowerShell MSI installation completed successfully." -ForegroundColor Green
+      }
+      catch {
+        Write-Host "PowerShell MSI installation failed. Error: $PSItem" -ForegroundColor Red
+        throw
       }
     }
     else
     {
       Write-Host "Latest PowerShell version is installed ($GitHubversion) - no update required." -ForegroundColor Green
     }
-  }
-}
+  }# end of powershell msi update option block
+}# end of powershell update block
 else {
   Write-Host "Skipping PowerShell update (selection)." -ForegroundColor Yellow
 }
 
 #endregion powershell
 
-Stop-Transcript
+if ($TranscriptActive) {
+  Stop-Transcript
+}
