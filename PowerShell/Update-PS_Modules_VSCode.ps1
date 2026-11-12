@@ -1,5 +1,5 @@
 # Update PowerShell 7, common PowerShell modules, and VS Code
-# Version 2.2 - 2026-11-11
+# Version 2.3 - 2026-11-12
 # for the most recent version of the script check out the public github repository: https://github.com/tstrueber/M365Public/blob/main/PowerShell/Update-PS_Modules_VSCode.ps1
 #region Variables
 param(
@@ -15,7 +15,7 @@ $ScriptPath = if ($PSCommandPath) { $PSCommandPath }
               elseif ($MyInvocation.MyCommand.Path) { $MyInvocation.MyCommand.Path } 
               elseif ($psEditor) { $psEditor.GetEditorContext().CurrentFile.Path }
 $ScriptDirectory = Split-Path -Parent $ScriptPath
-$Logpath = join-path $ScriptDirectory "LOGS"
+$Logpath = join-path $ScriptDirectory "LOG"
 $Scriptname = [System.IO.Path]::GetFileNameWithoutExtension($ScriptPath) # extract scriptname from $ScriptPath and remove the extension
 $temppath = "C:\Temp" #temp path for downloading the setup files
 $VSCodeInstallPath = "C:\Program Files\Microsoft VS Code" # system-wide VS Code installation
@@ -92,8 +92,8 @@ function Save-FileDownload
         Uri                      = $Url
         OutFile                  = $Destination
         ErrorAction              = 'Stop'
-        OperationTimeoutSeconds  = 10
-        ConnectionTimeoutSeconds = 5
+        OperationTimeoutSeconds  = 60
+        ConnectionTimeoutSeconds = 60
       }
       if ($SkipCertificateCheck) { $iwrParams.SkipCertificateCheck = $true }
       Invoke-WebRequest @iwrParams
@@ -152,7 +152,14 @@ function Get-PreferredGalleryVersion {
     [string[]]$BlockedVersions
   )
 
-  [array]$galleryVersions = Find-Module -Name $ModuleName -Repository PSGallery -AllVersions -ErrorAction Stop
+  # Without blocked versions only the latest stable version is needed. Querying all versions is considerably
+  # slower, which matters with the large number of Microsoft Graph sub-modules.
+  if ($BlockedVersions.Count -gt 0) {
+    [array]$galleryVersions = Find-Module -Name $ModuleName -Repository PSGallery -AllVersions -ErrorAction Stop
+  }
+  else {
+    [array]$galleryVersions = Find-Module -Name $ModuleName -Repository PSGallery -ErrorAction Stop
+  }
 
   $sortableVersions = foreach ($candidate in $galleryVersions) {
     $candidateVersionString = $candidate.Version.ToString()
@@ -179,6 +186,55 @@ function Get-PreferredGalleryVersion {
   }
 
   return $null
+}
+
+function Get-GraphSubModuleNames {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$MetaModuleName,
+    [Parameter(Mandatory = $true)]
+    [string]$ManagedModulePath
+  )
+
+  # The meta modules Microsoft.Graph and Microsoft.Graph.Beta only reference their sub-modules as dependencies.
+  # Save-ModuleVersionToModulePath copies only the requested module folder, so every sub-module has to be
+  # checked and updated on its own. Otherwise e.g. Microsoft.Graph can be current while
+  # Microsoft.Graph.Applications is still outdated.
+  $names = [System.Collections.Generic.List[string]]::new()
+  $seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+
+  try {
+    $metaGalleryModule = Find-Module -Name $MetaModuleName -Repository PSGallery -ErrorAction Stop | Select-Object -First 1
+    foreach ($dependency in $metaGalleryModule.Dependencies) {
+      $dependencyName = [string]$dependency.Name
+      if (-not [string]::IsNullOrWhiteSpace($dependencyName) -and $seen.Add($dependencyName)) {
+        $names.Add($dependencyName)
+      }
+    }
+    Write-Host ("{0} references {1} sub-modules in PSGallery." -f $MetaModuleName, $names.Count)
+  }
+  catch {
+    Write-Host "Could not read the sub-modules of $MetaModuleName from PSGallery - Error: $PSItem" -ForegroundColor Red
+  }
+
+  # Additionally include locally installed sub-modules in the managed module path that are not (or no longer)
+  # referenced by the meta module. Microsoft.Graph.Beta.* is excluded when processing Microsoft.Graph.
+  $normalizedRoot = [System.IO.Path]::GetFullPath($ManagedModulePath).TrimEnd('\') + '\'
+  $localModules = Get-Module -Name "$MetaModuleName.*" -ListAvailable -ErrorAction SilentlyContinue |
+    Where-Object {
+      ($MetaModuleName -ne 'Microsoft.Graph' -or $_.Name -notlike 'Microsoft.Graph.Beta*') -and
+      ([System.IO.Path]::GetFullPath($_.ModuleBase).StartsWith($normalizedRoot, [System.StringComparison]::OrdinalIgnoreCase))
+    }
+  foreach ($localModule in $localModules) {
+    if ($seen.Add($localModule.Name)) {
+      $names.Add($localModule.Name)
+    }
+  }
+
+  # Microsoft.Graph.Authentication is the base of all sub-modules, so process it first.
+  $authentication = @($names | Where-Object { $_ -eq 'Microsoft.Graph.Authentication' })
+  $others = @($names | Where-Object { $_ -ne 'Microsoft.Graph.Authentication' } | Sort-Object)
+  return @($authentication + $others)
 }
 
 function Remove-InstalledModuleFolder {
@@ -395,10 +451,30 @@ if ($RunModuleUpdate) {
   # We're installing from the PowerShell Gallery so make sure that it's trusted
   Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
 
+  # Expand the Microsoft Graph meta modules into their sub-modules. The sub-modules are processed before their
+  # meta module, so each of them is checked and updated individually.
+  $GraphMetaModuleNames = @("Microsoft.Graph", "Microsoft.Graph.Beta")
+  $ModulesToCheck = [System.Collections.Generic.List[string]]::new()
+  $ModulesToCheckSeen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+  foreach ($Module in $O365Modules) {
+    if ($GraphMetaModuleNames -contains $Module) {
+      Write-Host "Resolving sub-modules of $Module..."
+      foreach ($SubModule in (Get-GraphSubModuleNames -MetaModuleName $Module -ManagedModulePath $psmodulepath)) {
+        if ($ModulesToCheckSeen.Add($SubModule)) {
+          $ModulesToCheck.Add($SubModule)
+        }
+      }
+    }
+    if ($ModulesToCheckSeen.Add($Module)) {
+      $ModulesToCheck.Add($Module)
+    }
+  }
+  Write-Host ("{0} modules (including Microsoft Graph sub-modules) will be checked." -f $ModulesToCheck.Count) -ForegroundColor Yellow
+
   Write-Host ""
   Write-Host ""
   Write-Host "######### Check and update all modules to make sure that we're at the latest version" -ForegroundColor Cyan
-  foreach ($Module in $O365Modules) {
+  foreach ($Module in $ModulesToCheck) {
     Write-Host ("Checking module {0}" -f $Module)
     $BlockedVersionsForModule = Get-BlockedVersionsForModule -ModuleName $Module -BlockedVersionMap $ModuleVersionBlockList
     if ($BlockedVersionsForModule.Count -gt 0) {
@@ -477,7 +553,7 @@ if ($RunModuleUpdate) {
   # Get-InstalledModule only lists modules installed via Install-Module. Modules here are deployed via
   # Save-Module, so the Graph sub-modules are discovered via Get-Module -ListAvailable instead.
   [array]$GraphModules = Get-Module -Name "Microsoft.Graph*" -ListAvailable -ErrorAction SilentlyContinue | Select-Object -ExpandProperty Name -Unique
-  $ModulesToProcess = @($O365Modules) + $GraphModules | Sort-Object -Unique
+  $ModulesToProcess = @($ModulesToCheck) + $GraphModules | Sort-Object -Unique
 
   foreach ($Module in $ModulesToProcess) {
     Write-Host "Checking for older versions of $Module"
