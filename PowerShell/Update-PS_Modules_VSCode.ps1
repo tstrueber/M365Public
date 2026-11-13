@@ -1,5 +1,5 @@
 # Update PowerShell 7, common PowerShell modules, and VS Code
-# Version 2.3 - 2026-11-12
+# Version 2.4 - 2026-11-13
 # for the most recent version of the script check out the public github repository: https://github.com/tstrueber/M365Public/blob/main/PowerShell/Update-PS_Modules_VSCode.ps1
 #region Variables
 param(
@@ -8,7 +8,8 @@ param(
   [switch]$UpdatePSOnly,
   [switch]$UpdateModulesOnly,
   [switch]$UpdateVSCodeOnly,
-  [switch]$UpdateGitOnly
+  [switch]$UpdateGitOnly,
+  [switch]$UpdatePSwithZipMethod # use the ZIP based PowerShell update instead of winget
 )
 
 $ScriptPath = if ($PSCommandPath) { $PSCommandPath } 
@@ -431,7 +432,7 @@ else {
   $RunGitUpdate = $true
 }
 
-Write-Host "Update selection -> Modules: $RunModuleUpdate ; VS Code: $RunVSCodeUpdate ; Git: $RunGitUpdate ; PowerShell: $RunPowerShellUpdate" -ForegroundColor Cyan
+Write-Host "Update selection -> Modules: $RunModuleUpdate ; VS Code: $RunVSCodeUpdate ; Git: $RunGitUpdate ; PowerShell: $RunPowerShellUpdate (method: $(if ($UpdatePSwithZipMethod) { 'ZIP' } else { 'winget, ZIP fallback' }))" -ForegroundColor Cyan
 #endregion prerequisites
 
 #region powershell modules
@@ -808,8 +809,8 @@ else {
   Write-Host ""
   Write-Host "############ Check whether a newer PowerShell version is available..." -ForegroundColor Cyan
 
-  # Prefer winget when available.
-  $WingetCommand = Get-Command -Name "winget.exe" -ErrorAction SilentlyContinue
+  # Prefer winget when available, unless the ZIP method was explicitly requested.
+  $WingetCommand = if ($UpdatePSwithZipMethod) { $null } else { Get-Command -Name "winget.exe" -ErrorAction SilentlyContinue }
   if ($WingetCommand) {
     Write-Host "winget is available. Checking for a PowerShell upgrade..." -ForegroundColor Cyan
     # --exact avoids matching Microsoft.PowerShell.Preview; the agreement switches prevent interactive prompts.
@@ -846,7 +847,12 @@ else {
     }
   }
   else {
-    Write-Host "winget is not available. Falling back to the ZIP based PowerShell update." -ForegroundColor Yellow
+    if ($UpdatePSwithZipMethod) {
+      Write-Host "ZIP method requested (-UpdatePSwithZipMethod). Skipping winget and using the ZIP based PowerShell update." -ForegroundColor Yellow
+    }
+    else {
+      Write-Host "winget is not available. Falling back to the ZIP based PowerShell update." -ForegroundColor Yellow
+    }
 
     $GitHubversion = Get-GitHubVersion -url "https://github.com/PowerShell/PowerShell/releases/latest"
     $PwshLocalVersion = [version]::new($PSVersionTable.PSVersion.Major, $PSVersionTable.PSVersion.Minor, $PSVersionTable.PSVersion.Patch)
